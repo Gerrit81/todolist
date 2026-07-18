@@ -1,5 +1,5 @@
 /* =============================================================================
- * 任务管理系统 v1.0.0 — 前端应用逻辑
+ * 任务管理系统 v2.2.7 — 前端应用逻辑
  * 
  * 包含：
  *   1. 全局状态 / 初始化
@@ -20,11 +20,12 @@
 const API = 'api.php';
 
 // ========== 全局状态 ==========
-let categories = [], tags = [], tasks = [], groupedTasks = null;
+let categories = [], tags = [], tasks = [], groupedTasks = null, habits = [];
 let currentNav = 'today', currentView = 'list', currentCategory = 0, currentTag = 0, currentSearch = '';
 let selectedQuickTags = [], selectedEditTags = [], selectedColor = '#4A90D9';
 let userSettings = {}, summaryStats = {}, notificationShown = false;
 let pomoTimer = null, pomoRunning = false, pomoIsBreak = false, pomoSeconds = 0, pomoTotalSeconds = 0, pomoWorkMin = 25, pomoBreakMin = 5, pomoTaskId = 0;
+let createAttachFiles = [], editAttachFiles = [], selectedHabitIcon = '📌', selectedHabitDays = [1,2,3,4,5,6,7];
 
 // ========== 初始化 ==========
 document.addEventListener('DOMContentLoaded', async () => {
@@ -378,12 +379,13 @@ function switchNav(nav) {
     const vt = document.querySelector('.view-tab[data-view="list"]');
     if (vt) vt.classList.add('active');
     document.getElementById('listView').classList.remove('hidden');
-    ['calendarView', 'quadrantsView', 'pomodoroView', 'reviewView', 'summaryView'].forEach(id => document.getElementById(id).classList.add('hidden'));
+    ['calendarView', 'quadrantsView', 'pomodoroView', 'reviewView', 'summaryView', 'habitsView'].forEach(id => document.getElementById(id).classList.add('hidden'));
     document.getElementById('viewTabs').classList.remove('hidden');
     updateNavActive();
     renderCategories();
     renderTags();
     if (nav === 'review') { showReview(); return; }
+    if (nav === 'habits') { showHabitsView(); return; }
     loadTasks();
     loadSummary();
 }
@@ -393,12 +395,21 @@ function switchView(view) {
     document.querySelectorAll('.view-tab').forEach(t => t.classList.remove('active'));
     const vt = document.querySelector(`.view-tab[data-view="${view}"]`);
     if (vt) vt.classList.add('active');
-    ['listView', 'calendarView', 'quadrantsView', 'pomodoroView', 'reviewView', 'summaryView'].forEach(id => document.getElementById(id).classList.add('hidden'));
+    ['listView', 'calendarView', 'quadrantsView', 'pomodoroView', 'reviewView', 'summaryView', 'habitsView'].forEach(id => document.getElementById(id).classList.add('hidden'));
     document.getElementById(view === 'list' ? 'listView' : (view === 'calendar' ? 'calendarView' : (view === 'quadrants' ? 'quadrantsView' : 'pomodoroView'))).classList.remove('hidden');
-    if (view === 'calendar') renderCalendar();
-    else if (view === 'quadrants') loadQuadrants();
-    else if (view === 'pomodoro') showPomodoroView();
-    else loadTasks();
+    if (view === 'calendar') {
+        document.getElementById('pageTitle').textContent = '📅 日历';
+        document.getElementById('pageSub').textContent = '月 / 周 / 日视图';
+        renderCalendar();
+    } else if (view === 'quadrants') {
+        document.getElementById('pageTitle').textContent = '➕ 四象限';
+        document.getElementById('pageSub').textContent = '重要与紧急矩阵';
+        loadQuadrants();
+    } else if (view === 'pomodoro') {
+        showPomodoroView();
+    } else {
+        loadTasks();
+    }
 }
 
 function updateNavActive() {
@@ -451,7 +462,7 @@ async function loadTasks() {
             groupedTasks = null;
         }
         renderTasks();
-    } catch (e) {}
+    } catch (e) { console.error('loadTasks error:', e); }
 }
 
 function renderTasks() {
@@ -484,6 +495,14 @@ function renderTaskRow(t, isTrash = false) {
     const tagsHtml = (t.tags || []).map(tg => `<span class="task-tag-mini" style="background:${esc(tg.color)}">${esc(tg.name)}</span>`).join('');
     const pomoCount = (t.pomodoro_count || 0) > 0 ? `<span class="task-pomo-count">🍅 ${t.pomodoro_count}</span>` : '';
 
+    // 子任务标识
+    const isSubtask = t.parent_id > 0;
+    const subBadge = (t.subtask_count > 0)
+        ? `<span class="task-sub-badge" title="${t.subtask_done}/${t.subtask_count} 子任务已完成">📋 ${t.subtask_done}/${t.subtask_count}</span>`
+        : '';
+    const subClass = isSubtask ? ' sub-task' : '';
+    const titlePrefix = isSubtask ? '<span class="sub-connector">↳ </span>' : '';
+
     if (isTrash) {
         return `<div class="task-item${cc}" id="task-${t.id}">
             <div class="task-content"><div class="task-title">${esc(t.title)}</div>
@@ -493,19 +512,44 @@ function renderTaskRow(t, isTrash = false) {
     }
 
     const timeHtml = formatTaskTime(t);
+    const recurIcon = t.recurrence_type ? `<span class="task-recur-icon" title="${formatRecurrenceLabel(t.recurrence_type, t.recurrence_rule)}">🔁 ${(t.completion_count||0)}次</span>` : '';
     const statusLabel = { todo: '📝 待办', doing: '🔄 处理中', done: '✅ 完成' };
     const statusClass = { todo: '', doing: 'doing', done: 'done' };
 
-    return `<div class="task-item${cc}${dc}" id="task-${t.id}">
+    // 虚拟重复实例：只读展示，不可操作
+    if (t._virtual == 1) {
+        const recurLabel = formatRecurrenceLabel(t.recurrence_type, t.recurrence_rule);
+        return `<div class="task-item virtual-task${subClass}">
+            <div class="task-checkbox virtual" title="重复任务「${esc(t.title)}」的预排实例，完成当前期后将自动生成">🔁</div>
+            <div class="task-content">
+                <div class="task-title">${titlePrefix}${esc(t.title)} <span class="virtual-badge" title="${recurLabel}">预排</span></div>
+                <div class="task-meta">
+                    ${t.category_name ? `<span class="task-category-tag" style="background:${esc(t.category_color || '#95A5A6')}">${esc(t.category_name)}</span>` : ''}
+                    <span style="background:${pc(t.priority)};color:#fff;padding:1px 6px;border-radius:8px;font-size:11px">${pl}</span>
+                    ${timeHtml}
+                    <div class="task-tags">${tagsHtml}</div>
+                    ${recurIcon}
+                    ${subBadge}
+                </div>
+            </div>
+            <div class="task-actions">
+                <span class="virtual-hint" title="完成当前实例后将自动推进到此日期">⏳ 待推进</span>
+            </div>
+        </div>`;
+    }
+
+    return `<div class="task-item${cc}${dc}${subClass}" id="task-${t.id}">
         <div class="task-checkbox" onclick="toggleTask(${t.id},${t.is_completed == 1 ? 0 : 1})" title="${t.is_completed == 1 ? '标记未完成' : '标记已完成'}">${check}</div>
         <div class="task-content" onclick="editTask(${t.id})">
-            <div class="task-title">${esc(t.title)}${t.notes ? ' <span style="color:var(--text-muted);font-size:11px">📝</span>' : ''}</div>
+            <div class="task-title">${titlePrefix}${esc(t.title)}${t.notes ? ' <span style="color:var(--text-muted);font-size:11px">📝</span>' : ''}${isSubtask ? ' <span class="task-tag-mini" style="background:var(--text-muted);color:#fff">子任务</span>' : ''}</div>
             <div class="task-meta">
                 ${t.category_name ? `<span class="task-category-tag" style="background:${esc(t.category_color || '#95A5A6')}">${esc(t.category_name)}</span>` : ''}
                 <span style="background:${pc(t.priority)};color:#fff;padding:1px 6px;border-radius:8px;font-size:11px">${pl}</span>
                 ${timeHtml}
                 <div class="task-tags">${tagsHtml}</div>
                 ${pomoCount}
+                ${recurIcon}
+                ${subBadge}
             </div>
         </div>
         <div class="task-actions">
@@ -533,6 +577,12 @@ function es(icon, text) { return `<div class="empty-state"><div class="empty-sta
 async function createTask() {
     const t = document.getElementById('inputTitle').value.trim(), cid = parseInt(document.getElementById('inputCategory').value);
     if (!t) { showToast('请输入任务标题', 'error'); return; }
+    const remOffset = parseInt(document.getElementById('inputReminder').value);
+    let reminderCustom = null;
+    if (remOffset === -1) {
+        reminderCustom = document.getElementById('quickReminderDatetime').value;
+        if (reminderCustom) reminderCustom = reminderCustom.replace('T', ' ');
+    }
     try {
         const r = await fetch(API + '?action=create_task', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -540,7 +590,8 @@ async function createTask() {
                 title: t, category_id: cid,
                 priority: document.getElementById('inputPriority').value,
                 due_datetime: buildDt(document.getElementById('inputDueDate').value, document.getElementById('inputDueTime').value),
-                reminder_offset: parseInt(document.getElementById('inputReminder').value),
+                reminder_offset: remOffset === -1 ? 0 : remOffset,
+                reminder_custom: reminderCustom,
                 tag_ids: selectedQuickTags
             })
         });
@@ -550,7 +601,7 @@ async function createTask() {
     } catch (e) { showToast('网络错误', 'error'); }
 }
 
-function buildDt(d, t) { return d ? (d + (t ? ' ' + t : ' 23:59')) : null; }
+function buildDt(d, t) { return d ? (d + (t ? ' ' + t + ':00' : ' 09:00:00')) : null; }
 
 async function toggleTask(id, s) {
     try {
@@ -599,11 +650,14 @@ async function emptyTrash() {
 async function editTask(id) {
     try {
         const r = await fetch(API + '?action=get_task&id=' + id);
+        if (!r.ok) { showToast('获取任务失败(' + r.status + ')', 'error'); return; }
         const j = await r.json();
-        if (!j.success) { showToast('获取任务失败', 'error'); return; }
+        if (!j.success) { showToast(j.message || '获取任务失败', 'error'); return; }
         const t = j.data;
+        if (!t) { showToast('任务数据为空', 'error'); return; }
         document.getElementById('editTaskId').value = t.id;
         document.getElementById('editTaskTitle').value = t.title;
+        document.getElementById('editTaskDescription').value = t.description || '';
         document.getElementById('editTaskPriority').value = t.priority;
         document.getElementById('editTaskReminder').value = t.reminder_offset || '0';
         document.getElementById('editTaskNotes').value = t.notes || '';
@@ -612,10 +666,44 @@ async function editTask(id) {
         cs.innerHTML = categories.map(c => `<option value="${c.id}" ${c.id == t.category_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
         if (t.due_datetime) { const p = t.due_datetime.split(' '); document.getElementById('editTaskDate').value = p[0] || ''; document.getElementById('editTaskTime').value = (p[1] || '').substring(0, 5); }
         else { document.getElementById('editTaskDate').value = ''; document.getElementById('editTaskTime').value = ''; }
+        // 自定义提醒
+        if (t.reminder_custom) {
+            document.getElementById('editReminderDatetime').value = t.reminder_custom.replace(' ', 'T');
+            document.getElementById('editTaskReminder').value = '-1';
+        } else {
+            document.getElementById('editReminderDatetime').value = '';
+        }
+        toggleEditReminderCustom();
+        // 重复任务
+        document.getElementById('editRecurrenceType').value = t.recurrence_type || '';
+        document.getElementById('editRecurrenceEnd').value = t.recurrence_end || '';
+        document.getElementById('editRecurrenceStart').value = t.recurrence_start || '';
+        try {
+            const rrule = JSON.parse(t.recurrence_rule || '{}');
+            if (t.recurrence_type === 'weekly') {
+                const days = rrule.days || [];
+                document.querySelectorAll('#editWeekdayPicker input[type="checkbox"]').forEach(cb => {
+                    cb.checked = days.includes(parseInt(cb.value));
+                });
+            }
+            if (t.recurrence_type === 'monthly' && rrule.day) document.getElementById('editRecurrenceDay').value = rrule.day;
+            if (t.recurrence_type === 'yearly') {
+                if (rrule.month) document.getElementById('editRecurrenceMonth').value = rrule.month;
+                if (rrule.day) document.getElementById('editRecurrenceDayY').value = rrule.day;
+            }
+        } catch (e) {}
+        toggleEditRecurrence();
         selectedEditTags = (t.tag_ids || []).map(x => parseInt(x));
         renderEditTags();
+        // 子任务
+        renderEditSubtasks(t.subtasks || []);
+        // 附件
+        renderEditAttachments(t.attachments || []);
         document.getElementById('taskEditDialog').classList.add('show');
-    } catch (e) {}
+    } catch (e) {
+        console.error('editTask error:', e);
+        showToast('编辑弹窗加载失败：' + (e.message || '未知错误'), 'error');
+    }
 }
 
 function closeTaskEdit() { document.getElementById('taskEditDialog').classList.remove('show'); }
@@ -623,6 +711,22 @@ function closeTaskEdit() { document.getElementById('taskEditDialog').classList.r
 async function saveTaskEdit() {
     const id = parseInt(document.getElementById('editTaskId').value), title = document.getElementById('editTaskTitle').value.trim();
     if (!title) { showToast('请输入标题', 'error'); return; }
+    const remOffset = parseInt(document.getElementById('editTaskReminder').value);
+    let reminderCustom = null;
+    if (remOffset === -1) {
+        reminderCustom = document.getElementById('editReminderDatetime').value;
+        if (reminderCustom) reminderCustom = reminderCustom.replace('T', ' ');
+    }
+    // 先上传新附件
+    if (editAttachFiles.length > 0) {
+        for (const f of editAttachFiles) {
+            const fd = new FormData();
+            fd.append('task_id', id);
+            fd.append('file', f);
+            try { await fetch(API + '?action=upload_attachment', { method: 'POST', body: fd }); } catch (e) {}
+        }
+        editAttachFiles = [];
+    }
     try {
         const r = await fetch(API + '?action=update_task', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -630,9 +734,15 @@ async function saveTaskEdit() {
                 id, title, category_id: parseInt(document.getElementById('editTaskCategory').value),
                 priority: document.getElementById('editTaskPriority').value,
                 due_datetime: buildDt(document.getElementById('editTaskDate').value, document.getElementById('editTaskTime').value),
-                reminder_offset: parseInt(document.getElementById('editTaskReminder').value),
+                reminder_offset: remOffset === -1 ? 0 : remOffset,
+                reminder_custom: reminderCustom,
                 notes: document.getElementById('editTaskNotes').value.trim(),
+                description: document.getElementById('editTaskDescription').value.trim(),
                 status: document.getElementById('editTaskStatus').value,
+                recurrence_type: document.getElementById('editRecurrenceType').value,
+                recurrence_rule: getEditRecurrenceRule(),
+                recurrence_end: document.getElementById('editRecurrenceEnd').value || null,
+                recurrence_start: document.getElementById('editRecurrenceStart').value || null,
                 tag_ids: selectedEditTags
             })
         });
@@ -746,7 +856,10 @@ async function renderMonthView() {
             h += `<div class="full-cal-tasks">`;
             shown.forEach((t, idx) => {
                 const lastOne = overflow && idx === shown.length - 1;
-                h += `<div class="full-cal-task${t.is_completed == 1 ? ' completed' : ''}" style="background:${esc(t.category_color || '#95A5A6')}" onclick="event.stopPropagation();editTask(${t.id})" title="${esc(t.title)}">${lastOne ? '…' + esc(t.title) : esc(t.title)}</div>`;
+                const vCls = t._virtual ? ' virtual' : '';
+                const compCls = t.is_completed == 1 ? ' completed' : '';
+                const clickFn = t._virtual ? `openDayView('${ds}')` : `editTask(${t.id})`;
+                h += `<div class="full-cal-task${compCls}${vCls}" style="background:${esc(t.category_color || '#95A5A6')}" onclick="event.stopPropagation();${clickFn}" title="${esc(t.title)}${t._virtual ? '（预排）' : ''}">${lastOne ? '…' + esc(t.title) : esc(t.title)}</div>`;
             });
             h += `</div>`;
             if (overflow) h += `<div class="full-cal-more" onclick="event.stopPropagation();openDayView('${ds}')">+${list.length - maxTasks} 更多</div>`;
@@ -794,7 +907,10 @@ async function renderWeekView() {
         h += `<div class="week-day-body">`;
         if (list.length === 0) h += `<div style="font-size:10px;color:var(--text-muted);text-align:center;padding:8px">-</div>`;
         else list.slice(0, 12).forEach(t => {
-            h += `<div class="week-task${t.is_completed == 1 ? ' completed' : ''}" style="background:${esc(t.category_color || '#95A5A6')}" onclick="editTask(${t.id})" title="${esc(t.title)}">${esc(t.title)}</div>`;
+            const vCls = t._virtual ? ' virtual' : '';
+            const compCls = t.is_completed == 1 ? ' completed' : '';
+            const clickFn = t._virtual ? `openDayView('${ds}')` : `editTask(${t.id})`;
+            h += `<div class="week-task${compCls}${vCls}" style="background:${esc(t.category_color || '#95A5A6')}" onclick="${clickFn}" title="${esc(t.title)}${t._virtual ? '（预排）' : ''}">${esc(t.title)}</div>`;
         });
         if (list.length > 12) h += `<div class="cal-more-link" onclick="openDayView('${ds}')">+${list.length - 12} 更多</div>`;
         h += `</div></div>`;
@@ -863,7 +979,7 @@ async function loadQuadrants() {
         renderQ('q-inu', d.important_not_urgent, 'inu');
         renderQ('q-niu', d.not_important_urgent, 'niu');
         renderQ('q-ninu', d.not_important_not_urgent, 'ninu');
-    } catch (e) {}
+    } catch (e) { console.error('loadQuadrants error:', e); }
 }
 
 function renderQ(el, k, key) {
@@ -1085,6 +1201,469 @@ function startTabFlashMsg(msg) {
     window._tf = setInterval(() => { document.title = tg ? msg : o; tg = !tg; }, 1000);
     const s = () => { document.title = o; if (window._tf) { clearInterval(window._tf); window._tf = null; } window.removeEventListener('focus', s); };
     window.addEventListener('focus', s);
+}
+
+// ========== v6.0 详细任务创建弹窗 ==========
+function showTaskCreateDialog() {
+    // 同步清单选项
+    const cs = document.getElementById('createTaskCategory');
+    cs.innerHTML = categories.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+    // 同步标签
+    selectedQuickTags = [];
+    renderCreateTags();
+    // 重置字段
+    document.getElementById('createTaskTitle').value = '';
+    document.getElementById('createTaskDescription').value = '';
+    document.getElementById('createTaskNotes').value = '';
+    document.getElementById('createTaskDate').value = new Date().toISOString().slice(0, 10);
+    document.getElementById('createTaskTime').value = '09:00';
+    document.getElementById('createTaskReminder').value = '0';
+    document.getElementById('createReminderDatetime').value = '';
+    document.getElementById('createReminderCustomField').classList.add('hidden');
+    document.getElementById('createRecurrenceType').value = '';
+    document.getElementById('createRecurrenceEnd').value = '';
+    document.getElementById('createRecurrenceStart').value = '';
+    toggleCreateRecurrence();
+    document.getElementById('createTaskPriority').value = 'medium';
+    createAttachFiles = [];
+    document.getElementById('createAttachList').innerHTML = '';
+    document.getElementById('createTaskFile').value = '';
+    document.getElementById('taskCreateDialog').classList.add('show');
+}
+function closeTaskCreate() { document.getElementById('taskCreateDialog').classList.remove('show'); }
+function toggleCreateReminderCustom() {
+    document.getElementById('createReminderCustomField').classList.toggle('hidden', document.getElementById('createTaskReminder').value !== '-1');
+}
+function renderCreateTags() {
+    const c = document.getElementById('createTaskTags');
+    if (!c) return;
+    c.innerHTML = tags.map(t =>
+        `<span class="tag-edit-pill${selectedQuickTags.includes(parseInt(t.id)) ? ' selected' : ''}" style="${selectedQuickTags.includes(parseInt(t.id)) ? 'background:' + esc(t.color) : ''}" onclick="toggleCreateTag(${t.id})">${esc(t.name)}</span>`
+    ).join('');
+}
+function toggleCreateTag(id) { id = parseInt(id); selectedQuickTags = selectedQuickTags.includes(id) ? selectedQuickTags.filter(x => x !== id) : [...selectedQuickTags, id]; renderCreateTags(); }
+
+function handleCreateFileSelect() {
+    const inp = document.getElementById('createTaskFile');
+    for (const f of inp.files) {
+        if (f.size > 20 * 1024 * 1024) { showToast(`${f.name} 超过20MB限制`, 'error'); continue; }
+        createAttachFiles.push(f);
+    }
+    renderCreateAttachList();
+    inp.value = '';
+}
+function renderCreateAttachList() {
+    document.getElementById('createAttachList').innerHTML = createAttachFiles.map((f, i) => {
+        const size = f.size > 1048576 ? (f.size / 1048576).toFixed(1) + ' MB' : (f.size / 1024).toFixed(0) + ' KB';
+        return `<div class="attach-item"><span class="att-name">📄 ${esc(f.name)}</span><span class="att-size">${size}</span><div class="att-actions"><button class="att-btn danger" onclick="createAttachFiles.splice(${i},1);renderCreateAttachList()">×</button></div></div>`;
+    }).join('');
+}
+async function saveTaskCreate() {
+    const title = document.getElementById('createTaskTitle').value.trim();
+    const catId = parseInt(document.getElementById('createTaskCategory').value);
+    if (!title) { showToast('请输入任务标题', 'error'); return; }
+    if (!catId) { showToast('请选择清单', 'error'); return; }
+
+    const remOffset = parseInt(document.getElementById('createTaskReminder').value);
+    let reminderCustom = null;
+    if (remOffset === -1) {
+        reminderCustom = document.getElementById('createReminderDatetime').value;
+        if (reminderCustom) reminderCustom = reminderCustom.replace('T', ' ');
+    }
+
+    try {
+        const r = await fetch(API + '?action=create_task', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                title, category_id: catId,
+                priority: document.getElementById('createTaskPriority').value,
+                due_datetime: buildDt(document.getElementById('createTaskDate').value, document.getElementById('createTaskTime').value),
+                reminder_offset: remOffset === -1 ? 0 : remOffset,
+                reminder_custom: reminderCustom,
+                description: document.getElementById('createTaskDescription').value.trim(),
+                notes: document.getElementById('createTaskNotes').value.trim(),
+                recurrence_type: document.getElementById('createRecurrenceType').value,
+                recurrence_rule: getCreateRecurrenceRule(),
+                recurrence_end: document.getElementById('createRecurrenceEnd').value || null,
+                recurrence_start: document.getElementById('createRecurrenceStart').value || null,
+                tag_ids: selectedQuickTags
+            })
+        });
+        const j = await r.json();
+        if (j.success) {
+            const taskId = j.data.id;
+            // 上传附件
+            for (const f of createAttachFiles) {
+                const fd = new FormData();
+                fd.append('task_id', taskId);
+                fd.append('file', f);
+                try { await fetch(API + '?action=upload_attachment', { method: 'POST', body: fd }); } catch (e) {}
+            }
+            closeTaskCreate();
+            selectedQuickTags = []; renderQuickAddTags();
+            await Promise.all([loadTasks(), loadCategories(), loadTags(), loadSummary()]);
+            showToast('任务已创建', 'success');
+        } else showToast(j.message || '创建失败', 'error');
+    } catch (e) { showToast('网络错误', 'error'); }
+}
+
+// ========== 编辑弹窗辅助（提醒/子任务/附件） ==========
+function toggleEditReminderCustom() {
+    document.getElementById('editReminderCustomField').classList.toggle('hidden', document.getElementById('editTaskReminder').value !== '-1');
+}
+// ========== 重复任务辅助 ==========
+function toggleEditRecurrence() {
+    const t = document.getElementById('editRecurrenceType').value;
+    document.getElementById('editRecurrenceEndField').classList.toggle('hidden', !t);
+    document.getElementById('editRecurrenceStartField').classList.toggle('hidden', !t);
+    document.getElementById('editWeeklyDays').classList.toggle('hidden', t !== 'weekly');
+    document.getElementById('editMonthlyDay').classList.toggle('hidden', t !== 'monthly');
+    document.getElementById('editYearlyDate').classList.toggle('hidden', t !== 'yearly');
+}
+function toggleCreateRecurrence() {
+    const t = document.getElementById('createRecurrenceType').value;
+    document.getElementById('createRecurrenceEndField').classList.toggle('hidden', !t);
+    document.getElementById('createRecurrenceStartField').classList.toggle('hidden', !t);
+    document.getElementById('createWeeklyDays').classList.toggle('hidden', t !== 'weekly');
+    document.getElementById('createMonthlyDay').classList.toggle('hidden', t !== 'monthly');
+    document.getElementById('createYearlyDate').classList.toggle('hidden', t !== 'yearly');
+}
+function getEditRecurrenceRule() {
+    const t = document.getElementById('editRecurrenceType').value;
+    if (!t) return '';
+    if (t === 'weekly') {
+        const cbs = document.querySelectorAll('#editWeekdayPicker input[type="checkbox"]:checked');
+        const days = Array.from(cbs).map(cb => parseInt(cb.value)).sort((a,b) => a-b);
+        return JSON.stringify({ days });
+    }
+    if (t === 'monthly') return JSON.stringify({ day: parseInt(document.getElementById('editRecurrenceDay').value) || 1 });
+    if (t === 'yearly') return JSON.stringify({ month: parseInt(document.getElementById('editRecurrenceMonth').value) || 1, day: parseInt(document.getElementById('editRecurrenceDayY').value) || 1 });
+    if (t === 'daily') return JSON.stringify({ interval: 1 });
+    return '';
+}
+function getCreateRecurrenceRule() {
+    const t = document.getElementById('createRecurrenceType').value;
+    if (!t) return '';
+    if (t === 'weekly') {
+        const cbs = document.querySelectorAll('#createWeekdayPicker input[type="checkbox"]:checked');
+        const days = Array.from(cbs).map(cb => parseInt(cb.value)).sort((a,b) => a-b);
+        return JSON.stringify({ days });
+    }
+    if (t === 'monthly') return JSON.stringify({ day: parseInt(document.getElementById('createRecurrenceDay').value) || 1 });
+    if (t === 'yearly') return JSON.stringify({ month: parseInt(document.getElementById('createRecurrenceMonth').value) || 1, day: parseInt(document.getElementById('createRecurrenceDayY').value) || 1 });
+    if (t === 'daily') return JSON.stringify({ interval: 1 });
+    return '';
+}
+function formatRecurrenceLabel(type, rule) {
+    if (!type) return '';
+    const labels = { daily: '每天', weekly: '每周', monthly: '每月', yearly: '每年' };
+    let detail = '';
+    try {
+        const r = JSON.parse(rule || '{}');
+        if (type === 'weekly' && r.days && r.days.length) {
+            const dn = {1:'周一',2:'周二',3:'周三',4:'周四',5:'周五',6:'周六',7:'周日'};
+            detail = r.days.map(d => dn[d]).join('、');
+        } else if (type === 'monthly' && r.day) {
+            detail = r.day + '号';
+        } else if (type === 'yearly' && r.month) {
+            detail = r.month + '月' + (r.day || 1) + '日';
+        }
+    } catch (e) {}
+    return labels[type] + (detail ? '（' + detail + '）' : '');
+}
+
+function renderEditSubtasks(subtasks) {
+    const c = document.getElementById('editSubtaskList');
+    c.innerHTML = subtasks.map(st => {
+        const isDone = st.is_completed == 1;
+        const ds = st.due_datetime ? st.due_datetime.substring(0, 10) : '';
+        return `<div class="subtask-item">
+            <div class="sub-checkbox${isDone ? ' done' : ''}" onclick="toggleSubtask(${st.id},${isDone ? 0 : 1})">${isDone ? '✓' : ''}</div>
+            <div class="sub-title" onclick="editTask(${st.id})">${esc(st.title)}</div>
+            <div class="sub-date">${ds || '无截止'}</div>
+            <span class="sub-del" onclick="deleteTask(${st.id})">×</span>
+        </div>`;
+    }).join('');
+}
+function addSubtask() {
+    const parentId = parseInt(document.getElementById('editTaskId').value);
+    if (!parentId) return;
+    const title = prompt('子任务标题：');
+    if (!title || !title.trim()) return;
+    const dueDate = prompt('截止日期（可选，格式 YYYY-MM-DD）：', '');
+    (async () => {
+        try {
+            const r = await fetch(API + '?action=create_task', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    title: title.trim(), category_id: parseInt(document.getElementById('editTaskCategory').value),
+                    priority: 'medium', due_datetime: dueDate ? dueDate + ' 09:00' : null,
+                    parent_id: parentId
+                })
+            });
+            const j = await r.json();
+            if (j.success) {
+                showToast('子任务已添加', 'success');
+                editTask(parentId); // 重新加载编辑弹窗
+            } else showToast(j.message || '添加失败', 'error');
+        } catch (e) { showToast('网络错误', 'error'); }
+    })();
+}
+async function toggleSubtask(id, s) {
+    try {
+        await fetch(API + '?action=toggle_task', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, is_completed: s }) });
+        const parentId = parseInt(document.getElementById('editTaskId').value);
+        if (parentId) editTask(parentId);
+    } catch (e) {}
+}
+
+function renderEditAttachments(atts) {
+    const c = document.getElementById('editAttachList');
+    c.innerHTML = atts.map(a => {
+        const size = a.file_size > 1048576 ? (a.file_size / 1048576).toFixed(1) + ' MB' : (a.file_size / 1024).toFixed(0) + ' KB';
+        const isPdf = a.orig_name.toLowerCase().endsWith('.pdf') || (a.file_type && a.file_type.includes('pdf'));
+        return `<div class="attach-item">
+            <span class="att-name">📄 ${esc(a.orig_name)}</span>
+            <span class="att-size">${size}</span>
+            <div class="att-actions">
+                <button class="att-btn" onclick="window.open('${API}?action=download_attachment&id=${a.id}','_blank')" title="${isPdf ? '在线预览' : '下载'}">${isPdf ? '预览' : '下载'}</button>
+                <button class="att-btn danger" onclick="deleteAttachment(${a.id})">×</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+async function deleteAttachment(id) {
+    if (!confirm('删除此附件？')) return;
+    try { await fetch(API + '?action=delete_attachment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); showToast('附件已删除', 'success'); const taskId = parseInt(document.getElementById('editTaskId').value); if (taskId) editTask(taskId); } catch (e) {}
+}
+function handleEditFileSelect() {
+    const inp = document.getElementById('editTaskFile');
+    for (const f of inp.files) {
+        if (f.size > 20 * 1024 * 1024) { showToast(`${f.name} 超过20MB限制`, 'error'); continue; }
+        editAttachFiles.push(f);
+    }
+    renderEditFileList();
+    inp.value = '';
+}
+function renderEditFileList() {
+    const existing = document.getElementById('editAttachList').innerHTML;
+    const pending = editAttachFiles.map((f, i) => {
+        const size = f.size > 1048576 ? (f.size / 1048576).toFixed(1) + ' MB' : (f.size / 1024).toFixed(0) + ' KB';
+        return `<div class="attach-item"><span class="att-name">⏳ ${esc(f.name)}</span><span class="att-size">${size}</span><span style="color:var(--text-muted);font-size:11px">待上传</span></div>`;
+    }).join('');
+    document.getElementById('editAttachList').innerHTML = existing + pending;
+}
+
+// ========== 快速添加提醒自定义 ==========
+// 监听快速添加的提醒选择
+document.getElementById('inputReminder').addEventListener('change', function() {
+    document.getElementById('quickCustomReminder').classList.toggle('hidden', this.value !== '-1');
+});
+document.getElementById('inputTitle').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); createTask(); }
+});
+
+// ========== v6.0 打卡模块 ==========
+async function showHabitsView() {
+    currentNav = 'habits';
+    updateNavActive();
+    document.getElementById('listView').classList.add('hidden');
+    ['calendarView', 'quadrantsView', 'pomodoroView', 'reviewView', 'summaryView'].forEach(id => document.getElementById(id).classList.add('hidden'));
+    document.getElementById('habitsView').classList.remove('hidden');
+    document.getElementById('viewTabs').classList.add('hidden');
+    document.getElementById('habitDetailPanel').classList.add('hidden');
+    document.getElementById('pageTitle').textContent = '✅ 打卡';
+    document.getElementById('pageSub').textContent = '每日习惯追踪';
+    await loadHabits();
+}
+async function loadHabits() {
+    try {
+        const r = await fetch(API + '?action=list_habits');
+        const j = await r.json();
+        if (!j.success) return;
+        habits = j.data;
+        document.getElementById('count-habits').textContent = habits.length;
+        renderHabitsGrid();
+        loadHabitsStats();
+    } catch (e) { console.error('loadHabits error:', e); }
+}
+async function loadHabitsStats() {
+    try {
+        const r = await fetch(API + '?action=all_habits_stats');
+        const j = await r.json();
+        if (!j.success) return;
+        document.getElementById('habitsStats').innerHTML = `
+            <span>今日打卡 <strong>${j.data.today_count}</strong> / ${j.data.total_habits}</span>
+            <span>习惯数 <strong>${j.data.total_habits}</strong></span>
+        `;
+        renderTrendChart(j.data.trend);
+    } catch (e) {}
+}
+function renderTrendChart(trend) {
+    const maxCnt = Math.max(...trend.map(d => d.count), 1);
+    document.getElementById('habitsTrend').innerHTML = `
+        <div class="habits-trend-title">📈 近7天打卡趋势</div>
+        <div class="habits-trend-chart">
+            ${trend.map(d => {
+                const h = Math.round(d.count / maxCnt * 70);
+                return `<div class="habit-trend-col">
+                    <div class="habit-trend-bar ${d.count > 0 ? 'filled' : 'empty'}" style="height:${Math.max(h, 3)}px" title="${d.date}: ${d.count}项"></div>
+                    <div class="habit-trend-day">${d.day}</div>
+                </div>`;
+            }).join('')}
+        </div>
+    `;
+}
+function renderHabitsGrid() {
+    const c = document.getElementById('habitsGrid');
+    if (habits.length === 0) {
+        c.innerHTML = `<div class="empty-state"><div class="empty-state-icon">✅</div><div class="empty-state-text">还没有打卡习惯，点击"新建习惯"开始吧</div></div>`;
+        return;
+    }
+    c.innerHTML = '';
+    habits.forEach(h => {
+        const card = document.createElement('div');
+        card.className = 'habit-card fade-in';
+        card.onclick = function(e) { if (e.target.closest('.habit-check-btn') || e.target.closest('.habit-card-delete')) return; showHabitDetail(h.id); };
+        card.innerHTML = `
+            <div class="habit-card-header">
+                <div class="habit-card-icon" style="background:${esc(h.color)}22">${esc(h.icon)}</div>
+                <div class="habit-card-name">${esc(h.name)}</div>
+                <span class="habit-card-delete" onclick="event.stopPropagation();deleteHabit(${h.id})">×</span>
+            </div>
+            <div class="habit-card-stats" id="habit-stats-${h.id}">
+                <span><span class="hs-val">-</span><span class="hs-label">连续</span></span>
+                <span><span class="hs-val">-</span><span class="hs-label">完成率</span></span>
+            </div>
+            <div class="habit-card-check">
+                <button class="habit-check-btn ${h.checked_today ? 'checked' : 'unchecked'}" onclick="toggleHabitCheck(${h.id}, this)" id="habit-btn-${h.id}">
+                    ${h.checked_today ? '✅ 今日已打卡' : '☐ 打卡'}
+                </button>
+            </div>
+        `;
+        c.appendChild(card);
+        loadHabitCardStats(h.id);
+    });
+}
+async function loadHabitCardStats(habitId) {
+    try {
+        const r = await fetch(API + '?action=habit_stats&habit_id=' + habitId);
+        const j = await r.json();
+        if (!j.success) return;
+        const el = document.getElementById('habit-stats-' + habitId);
+        if (el) el.innerHTML = `
+            <span><span class="hs-val">${j.data.streak}</span><span class="hs-label">连续</span></span>
+            <span><span class="hs-val">${j.data.month_rate}%</span><span class="hs-label">本月</span></span>
+        `;
+    } catch (e) {}
+}
+async function toggleHabitCheck(habitId, btn) {
+    btn.disabled = true;
+    try {
+        const r = await fetch(API + '?action=toggle_habit', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: habitId, date: new Date().toISOString().slice(0, 10) })
+        });
+        const j = await r.json();
+        if (j.success) {
+            if (j.data.checked) { btn.textContent = '✅ 今日已打卡'; btn.className = 'habit-check-btn checked'; }
+            else { btn.textContent = '☐ 打卡'; btn.className = 'habit-check-btn unchecked'; }
+            showToast(j.message, j.data.checked ? 'success' : 'info');
+            loadHabitCardStats(habitId);
+            loadHabitsStats();
+        }
+    } catch (e) {}
+    btn.disabled = false;
+}
+async function showHabitDetail(habitId) {
+    document.getElementById('habitsGrid').classList.add('hidden');
+    document.getElementById('habitsTrend').classList.add('hidden');
+    document.getElementById('habitsStats').parentElement.classList.add('hidden');
+    const panel = document.getElementById('habitDetailPanel');
+    panel.classList.remove('hidden');
+    panel.innerHTML = '<div style="text-align:center;padding:40px">加载中...</div>';
+    try {
+        const [hr, sr] = await Promise.all([
+            fetch(API + '?action=list_habits').then(r => r.json()),
+            fetch(API + '?action=habit_stats&habit_id=' + habitId).then(r => r.json())
+        ]);
+        const h = (hr.data || []).find(x => parseInt(x.id) === habitId);
+        if (!h) { panel.innerHTML = '未找到该习惯'; return; }
+        const s = sr.data;
+        const monthDays = parseInt(s.month_total);
+        const calendarDays = [];
+        for (let i = monthDays - 1; i >= 0; i--) {
+            const dt = new Date();
+            dt.setDate(dt.getDate() - i);
+            const ds = dt.toISOString().slice(0, 10);
+            const wd = ['日', '一', '二', '三', '四', '五', '六'][dt.getDay()];
+            const checked = s.daily_30 ? s.daily_30.some(d => d.date === ds && d.checked) : false;
+            calendarDays.push({ ds, wd, checked, isToday: i === 0 });
+        }
+        panel.innerHTML = `
+            <span class="habit-detail-back" onclick="showHabitsList()">← 返回打卡列表</span>
+            <div class="habit-detail-header">
+                <div class="habit-card-icon" style="background:${esc(h.color)}22;font-size:36px;width:56px;height:56px">${esc(h.icon)}</div>
+                <div class="hd-name">${esc(h.name)}</div>
+            </div>
+            <div class="habit-detail-grid">
+                <div class="hd-stat"><div class="hd-val">${s.total_checks}</div><div class="hd-label">总打卡</div></div>
+                <div class="hd-stat"><div class="hd-val">${s.streak}</div><div class="hd-label">连续天数</div></div>
+                <div class="hd-stat"><div class="hd-val">${s.month_rate}%</div><div class="hd-label">本月完成率</div></div>
+            </div>
+            <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px">📅 本月打卡日历</div>
+            <div class="habit-detail-calendar">
+                ${calendarDays.map(d => `<div class="habit-cal-day${d.checked ? ' checked' : ''}${d.isToday ? ' today' : ''}" title="${d.ds} 周${d.wd}">${d.ds.slice(8)}</div>`).join('')}
+            </div>
+        `;
+    } catch (e) { panel.innerHTML = '加载失败'; }
+}
+function showHabitsList() {
+    document.getElementById('habitsGrid').classList.remove('hidden');
+    document.getElementById('habitsTrend').classList.remove('hidden');
+    document.getElementById('habitsStats').parentElement.classList.remove('hidden');
+    document.getElementById('habitDetailPanel').classList.add('hidden');
+}
+
+// ========== 打卡习惯 CRUD ==========
+function showHabitDialog(eid = 0, en = '', ei = '📌', ec = '#4A90D9', ed = '1,2,3,4,5,6,7') {
+    document.getElementById('habitDialogTitle').textContent = eid ? '编辑习惯' : '新建打卡习惯';
+    document.getElementById('editHabitId').value = eid || '';
+    document.getElementById('habitNameInput').value = en;
+    document.getElementById('habitColorInput').value = ec;
+    selectedHabitIcon = ei;
+    selectedHabitDays = ed ? ed.split(',').map(x => parseInt(x)) : [1,2,3,4,5,6,7];
+    // 更新图标选中状态
+    document.querySelectorAll('#habitIconOptions .icon-option').forEach(el => {
+        el.classList.toggle('selected', el.dataset.icon === ei);
+    });
+    // 更新工作日选中状态
+    document.querySelectorAll('#habitWeekdays .wday-chip').forEach(el => {
+        el.classList.toggle('selected', selectedHabitDays.includes(parseInt(el.dataset.day)));
+    });
+    document.getElementById('habitDialog').classList.add('show');
+}
+function closeHabitDialog() { document.getElementById('habitDialog').classList.remove('show'); }
+function pickHabitIcon(icon, el) { selectedHabitIcon = icon; document.querySelectorAll('#habitIconOptions .icon-option').forEach(e => e.classList.remove('selected')); if (el) el.classList.add('selected'); }
+function toggleHabitDay(el) { const d = parseInt(el.dataset.day); if (selectedHabitDays.includes(d)) selectedHabitDays = selectedHabitDays.filter(x => x !== d); else selectedHabitDays.push(d); el.classList.toggle('selected'); }
+async function saveHabit() {
+    const name = document.getElementById('habitNameInput').value.trim();
+    const eid = document.getElementById('editHabitId').value;
+    if (!name) { showToast('请输入习惯名称', 'error'); return; }
+    const targetDays = selectedHabitDays.sort((a, b) => a - b).join(',');
+    try {
+        const r = await fetch(API + '?action=' + (eid ? 'update_habit' : 'create_habit'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: eid ? parseInt(eid) : undefined, name, icon: selectedHabitIcon, color: document.getElementById('habitColorInput').value, target_days: targetDays })
+        });
+        const j = await r.json();
+        if (j.success) { closeHabitDialog(); await loadHabits(); showToast(eid ? '习惯已更新' : '习惯已创建', 'success'); }
+        else showToast(j.message || '操作失败', 'error');
+    } catch (e) { showToast('网络错误', 'error'); }
+}
+async function deleteHabit(id) {
+    if (!confirm('确定删除该打卡习惯？所有记录将被清除。')) return;
+    try { await fetch(API + '?action=delete_habit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); showToast('习惯已删除', 'success'); await loadHabits(); } catch (e) {}
 }
 
 // ========== 工具函数 ==========

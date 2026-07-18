@@ -4,6 +4,268 @@
 
 ---
 
+## [2.2.7] - 2026-07-18
+
+### 安全
+
+- **数据库文件防直接下载**：新增 `.htaccess`（Apache）和 `data/.htaccess`，阻止 `data/` 目录及 `.db`/`.log`/配置文件被 HTTP 直接访问
+- **SMTP 密码加密存储**：SMTP 密码不再明文存储于数据库，改用 AES-256-CBC 加密（`encryptSensitive` / `decryptSensitive`），兼容旧版明文数据自动迁移
+- **安全响应头**：`.htaccess` 加入 `X-Content-Type-Options`、`X-Frame-Options`、`X-XSS-Protection`
+
+### 新增
+
+- `config.php` 新增 `encrypt_key` 配置项，部署后务必自定义随机密钥
+- `config.php` 新增 `encryptSensitive()` / `decryptSensitive()` 加解密函数
+
+---
+
+## [2.2.6] - 2026-07-18
+
+### 修复
+
+- **月历视图 `recurrence_start` 约束失效**：`calendar_tasks` 接口的 SQL 查询缺少 `recurrence_start` 和 `created_at` 字段，导致 `expandRecurringTasks()` 中这两个字段永远为 NULL，开始日期约束完全不生效。现已补全字段，重复任务在月历中不会再无限向前展开。
+
+---
+
+## [2.2.5] - 2026-07-18
+
+### 新增
+
+- **重复任务开始日期（`recurrence_start`）**：循环重复任务现在支持设置开始日期，限制向前展开的边界。未设置时默认使用任务创建时间（`created_at`）。解决了之前切换月历到过去的月份时，重复任务会无限向前展开显示所有历史实例的问题。
+
+### 修改
+
+- `tasks` 表新增 `recurrence_start` 字段（DATETIME），v8.0 数据库自动迁移
+- `expandRecurringTasks()` 逆向回退时检查 `recurrence_start`，不再展开早于开始日期的实例
+- 创建/编辑任务弹窗中重复设置区新增「开始日期」输入框
+- `toggle_task` 完成重复任务时同步复制 `recurrence_start` 到下一期实例
+- `check.php` 诊断第 9 节显示 `recurrence_start` 字段信息
+
+---
+
+## [2.2.4] - 2026-07-18
+
+### 修复
+
+- **日视图不显示重复任务**：v2.2.3 的逆向回退锚点逻辑存在"差一步"问题。回退到刚好在范围之前时 `break` 但没有把 `$current` 移到该位置，导致 `computeNextOccurrence()` 多跳了一步，跳过了范围内的唯一一次发生。单天日视图（范围宽度仅 1 天）最容易触发此问题。
+- 同时修复 v2.2.3 引入的月视图"少第一天"问题：7 月第一个周四（7/2）也会因为同样的锚点偏移被遗漏。
+
+---
+
+## [2.2.4] - 2026-07-18
+
+### 修复
+
+- **重复任务在月历/周历中"超前到期不显示"**：`expandRecurringTasks()` 之前只从 `due_datetime` 正向推算，如果 `due_datetime` 远在视图范围之后（如 12 月 31 日的任务看 7 月日历），所有虚拟实例都在视图之外，月历/周历中完全没有。
+
+  修复方案：
+  - 新增 `computePrevOccurrence()` 函数，作为 `computeNextOccurrence()` 的逆运算，支持 daily/weekly/monthly/yearly 四种重复类型
+  - `expandRecurringTasks()` 增加逆向回退：当 `due_datetime` 超出视图范围时，先逆向回退到范围附近的锚点，再从锚点正向展开
+  - `check.php` 诊断联动更新：逐项诊断同时展示逆向回退和正向推算结果
+
+### 改进
+
+- `check.php` 数据库路径修正：`todos.db` → `todolist.db`（与 `config.php` 一致）
+
+---
+
+## [2.2.2] - 2026-07-18
+
+### 修复
+
+- **`expandRecurringTasks()` 静默失败风险**：函数中使用 `@new DateTime()` 抑制错误，若日期格式异常，`$current` 会变成 `false`，导致后续 `$current->format()` 触发致命错误，使整个 `calendar_tasks` 接口返回 500。现改为 `try-catch` 显式捕获异常并跳过异常任务。
+- **`check.php` 新增「重复任务诊断」**：第 9 节列出数据库中所有循环任务详情，并模拟当前月的虚拟展开，逐项显示每一期的计算结果以及是否落在视图范围内。方便快速定位"循环任务在日历中不显示"的根因（数据丢失 / 全部已完成 / 日期范围偏差 / 计算逻辑 bug）。
+
+### 改进
+
+- `expandRecurringTasks()` 中 `@new DateTime()` 全部替换为 `try-catch`，避免静默错误
+- `check.php` 不再 require api.php（避免路由逻辑冲突），诊断逻辑完全内联
+
+---
+
+## [2.2.1] - 2026-07-18
+
+### 修复
+
+- **重复任务在日历/周历/列表视图中不可见**：上一版采用"惰性生成"模式，只有当前实例存入数据库，后续实例在完成时才生成，导致月历/周历/日历/列表中只能看到一期。现已改为"虚拟展开"模式 —— 查询时对重复任务自动向后推算所有未来出现日期，在视图中以半透明虚线样式展示，无需等待逐期完成。
+  - 新增 `expandRecurringTasks()` 函数，支持按日期范围批量展开重复任务
+  - `calendar_tasks` 月历视图：自动展开当月全部重复实例
+  - `list_tasks` 日期筛选视图（今天/明天/7天内/未来/日历单天）：自动注入虚拟实例
+  - 前端虚拟实例以半透明虚线样式展示，带"预排""⏳ 待推进"标识
+  - 虚拟实例不可直接操作（完成/编辑/删除），需通过完成当前真实实例自然推进
+
+---
+
+## [2.2.0] - 2026-07-18
+
+### 新增
+
+- **重复任务（周期性任务）**：支持设置任务按日/周/月/年自动重复
+  - 每日：每 N 天重复一次
+  - 每周：选择一周中的指定日期（如每周一、三、五）
+  - 每月：每月固定日期（如每月 5 号）
+  - 每年：每年固定月日（如每年 3 月 15 日）
+  - 可选设置重复截止日期，到达截止日自动停止生成新实例
+  - 完成任务时自动计算并生成下一期实例，同时保留已完成记录
+  - 任务行显示 🔁 重复标识和完成次数统计
+  - 创建/编辑弹窗中完整的重复设置面板
+
+### 数据库
+
+- `tasks` 表新增 4 个字段：`recurrence_type`、`recurrence_rule`、`recurrence_end`、`completion_count`（v7.0 自动迁移）
+- 新增 `computeNextOccurrence()` 工具函数，支持 DateTime 精确计算，自动处理月末天数和跨年
+
+---
+
+## [2.1.6] - 2026-07-18
+
+### 修复
+
+- **Windows phpStudy 环境下 SQL 排序报错**：`ORDER BY t.due_datetime ASC NULLS LAST` 语法需要 SQLite ≥ 3.30.0，而 phpStudy 捆绑的 SQLite 版本通常低于此。现已将全部 7 处 `NULLS LAST` 替换为 `CASE WHEN t.due_datetime IS NULL THEN 1 ELSE 0 END, t.due_datetime ASC`，在所有 SQLite 版本上兼容
+
+---
+
+## [2.1.5] - 2026-07-18
+
+### 优化
+
+- `check.php` 诊断脚本增强：显示 php.ini 加载路径、已加载扩展完整列表，并对缺失扩展给出群晖 Web Station「双层配置」的排查指引（套件中心打勾 ≠ Web Station 生效）
+
+---
+
+## [2.1.4] - 2026-07-18
+
+### 修复
+
+- **Windows Server 日视图/四象限不显示未来任务**：`list_tasks` API 的 `calendar_date` 日期筛选使用 `strtotime('YYYY-MM-DD +1 day')` 计算次日边界，该写法在 Windows 某些 PHP 版本下会返回 `false`，导致 `date('Y-m-d', false)` = `'1970-01-01'`，范围筛选变成 `>= 2026-10-15 AND < 1970-01-01` 永远为空。现已改为 `DateTime` 类计算次日，并在极端情况下降级为 `mktime` 手动拆分计算
+- 日期边界值格式与 `calendar_tasks` 保持一致：从 `'YYYY-MM-DD HH:MM:SS'` 改为纯日期 `'YYYY-MM-DD'`，避免时间组件不一致导致的字符串比较歧义
+
+### 优化
+
+- `check.php` 新增 DateTime 日期计算测试（含 `strtotime` 兼容性检测）、SQLite 版本号及 `NULLS LAST` 支持检测，便于在服务器上快速诊断环境问题
+
+---
+
+## [2.1.3] - 2026-07-18
+
+### 修复
+
+- **未来日期任务在日视图/四象限/列表中不显示**：`list_tasks` API 中使用 `date(t.due_datetime)` 函数进行日期筛选，跨3个月的 `2026-10-15` 格式在 SQLite PDO 绑定下可能匹配失败。改为与 `calendar_tasks` 一致的范围比较 (`>= :cal_start AND < :cal_end`)，月视图能显示的任务现在日视图/四象限也能正确显示
+- **`due_datetime` 格式统一**：`buildDt()` 生成的截止时间从 `HH:MM` 统一为 `HH:MM:SS`，确保 SQLite 字符串比较精确一致
+
+### 优化
+
+- **优先级下拉框宽度**：`task-input-priority` 从 80px 扩至 95px，解决 Windows Server 上「🔴 高」等中文选项右侧截断问题
+- **视图切换标题更新**：`switchView` 中为日历视图和四象限视图显式设置 `pageTitle` / `pageSub`，切换番茄钟后再切回其他视图标题不再卡在"🍅 番茄钟"
+- **错误日志**：`loadTasks`、`loadQuadrants` 空 catch 块改为 `console.error`，便于排查静默失败
+
+---
+
+## [2.1.2] - 2026-07-18
+
+### 优化
+
+- 左侧导航模块标题字号从 `12px` 提升至 `14px`，颜色改为正文色 `--text`，字重 `700`，明显大于导航项（13px），层级更清晰
+- 全部 7 个弹窗右上角新增 ✕ 关闭按钮（绝对定位 `top:16px right:16px`，28px 圆形 hover 效果），无需滚动到底部点取消即可关闭
+
+### 修复
+
+- h3 标题增加 `padding-right: 28px` 防止标题过长与关闭按钮重叠
+
+---
+
+## [2.1.1] - 2026-07-18
+
+### 修复
+
+- **打卡视图统计不显示**：`loadHabits()` 中误调用了不存在的 `loadHabitsTrend()` 函数，导致 JS 抛出异常被空 `catch` 吞掉，后续的 `loadHabitsStats()` 从未执行。已删除该错误调用并将空 catch 改为 `console.error` 输出。
+- 导航打开打卡页现在立即显示统计信息（今日打卡数、习惯数、近7天趋势图）
+
+### 优化
+
+- 左侧导航模块标题字号从 `10px` 调整为 `12px`，颜色从 `text-muted` 调整为 `text-light`，去掉 `uppercase` 全大写和 `letter-spacing`，视觉更协调
+
+---
+
+## [2.1.0] - 2026-07-18
+
+### 新增功能
+
+**📋 子任务列表标识**
+- 子任务（有 `parent_id`）在列表中显示缩进 + `↳` 连接线和「子任务」标签，直观区分层级
+- 父任务显示 `📋 已完成/总数` 徽章，一目了然子任务完成进度
+- 左侧浅色竖线 + 连接横线形成树状视觉效果（`::before` 伪元素实现）
+- `list_tasks` API 自动附加子任务计数（`subtask_count`、`subtask_done`）
+
+**📊 左侧导航重排**
+- 「打卡」模块移至「每日回顾」下方，作为「📋 独立模块」独立区域
+- 与上方导航区以分组标题自然分隔，模块边界清晰
+
+### 优化
+
+**🎨 全局滚动条统一**
+- 为全部 6 套主题皮肤添加专属滚动条配色变量
+- 全局 WebKit + Firefox 滚动条统一样式（`scrollbar-width: thin`）
+- 滚动条颜色与所属主题协调，暗夜模式也有专属暗色滚动条
+- 侧边栏保留稍窄的 4px 滚动条宽度
+
+### 修复
+
+- 修复 `editTask` 函数空 catch 块静默吞错误导致点击任务无响应的问题
+- 增加 HTTP 状态检查、数据空值校验和错误 Toast 反馈
+
+---
+
+## [2.0.0] - 2026-07-18
+
+### 重大更新
+
+**📝 详细任务创建弹窗**
+- 保留快速添加功能，新增「📝 详细」按钮打开完整创建弹窗
+- 新增字段：**描述**（description，支持换行）和**备注**（notes）
+- 支持上传附件，常见 PDF 可在线预览（浏览器直接打开）
+- 标签选择、优先级、截止日期/时间、自定义提醒一体设置
+
+**📋 子任务功能**
+- 任务新增 `parent_id` 字段支持层级关系
+- 编辑弹窗中的「📋 子任务」区域：查看/添加/切换完成/删除子任务
+- 每个子任务可设置独立的截止日期，适合项目分阶段管理
+- 创建/编辑任务时可指定父任务
+
+**⏰ 提醒时间升级**
+- 提醒方式新增「**自定义**」选项，可选择任意日期和时间
+- 适用于跨周末、节假日、调休等场景
+- 默认提醒时间从 23:59 改为 **09:00**（合理工作时间）
+- `reminder_custom` 字段存储精确的自定义提醒时间
+- 邮件提醒和页面提醒均支持自定义时间触发
+
+**✅ 打卡模块**
+- 侧边栏新增「打卡」导航入口
+- 支持创建自定义习惯项目（名称、图标、颜色、打卡日）
+- 12 种预设图标可选（🏃📖💪🧘💧🍎✍️🎵🌱💤🎯📌）
+- 每日打卡/取消打卡，卡片实时展示
+- 统计展示：总打卡数、连续天数、本月完成率
+- 近7天趋势柱状图（所有习惯聚合）
+- 习惯详情面板：本月日历热力图
+- 新增 3 张数据表：`habits`、`habit_logs`、`task_attachments`
+
+**📎 附件系统**
+- 任务支持上传文件附件（图片、PDF、文档等）
+- 单文件最大 20MB
+- PDF 文件支持浏览器**在线预览**（inline 模式）
+- 附件存储在 `data/uploads/{user_id}/` 目录
+- 新增 API：`upload_attachment`、`download_attachment`、`delete_attachment`、`list_attachments`
+
+### 技术变更
+
+- `tasks` 表新增 `parent_id`、`description`、`reminder_custom` 字段
+- 新增表：`task_attachments`、`habits`、`habit_logs`
+- v6.0 自动迁移逻辑兼容旧版数据库
+- API 新增 10+ 接口
+- 弹窗支持 `modal-wide` 宽版模式（720px）
+
+---
+
 ## [1.0.0] - 2026-07-18
 
 ### 正式版发布

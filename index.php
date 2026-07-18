@@ -1,8 +1,8 @@
 <?php
 /**
- * 任务管理系统 v1.0.0 — 效率办公中心
+ * 任务管理系统 v2.2.7 — 效率办公中心
  *
- * 功能：任务管理 / 番茄钟 / 多皮肤主题 / 任务工作流(待办→处理→完成) / 每日回顾
+ * 功能：任务管理 / 番茄钟 / 多皮肤主题 / 任务工作流(待办→处理→完成) / 每日回顾 / 子任务 / 附件 / 打卡
  *
  * 文件结构：
  *   css/style.css — 全局样式 + 6套皮肤
@@ -90,6 +90,11 @@ require_once __DIR__ . '/config.php';
             </div>
 
             <div class="nav-section">
+                <div class="nav-section-title">📋 独立模块</div>
+                <div class="nav-item" data-nav="habits" onclick="switchNav('habits')"><span class="nav-icon">✅</span><span class="nav-label">打卡</span><span class="nav-count" id="count-habits">0</span></div>
+            </div>
+
+            <div class="nav-section">
                 <div class="nav-section-title">🗂️ 清单</div>
                 <div id="categoryList" class="category-list"></div>
                 <button class="btn-new" onclick="showCategoryDialog()">+ 新建清单</button>
@@ -131,11 +136,16 @@ require_once __DIR__ . '/config.php';
                         <select class="task-input-category" id="inputCategory"></select>
                         <select class="task-input-priority" id="inputPriority"><option value="high">🔴 高</option><option value="medium" selected>🟡 中</option><option value="low">🟢 低</option></select>
                         <input type="date" class="task-input-date" id="inputDueDate" value="<?php echo date('Y-m-d'); ?>">
-                        <input type="time" class="task-input-time" id="inputDueTime" value="23:59">
-                        <select class="task-input-reminder" id="inputReminder"><option value="0">准时</option><option value="5">5分钟前</option><option value="15">15分钟前</option><option value="30">30分钟前</option><option value="60">1小时前</option><option value="1440">1天前</option></select>
+                        <input type="time" class="task-input-time" id="inputDueTime" value="09:00">
+                        <select class="task-input-reminder" id="inputReminder"><option value="0">准时</option><option value="5">5分钟前</option><option value="15">15分钟前</option><option value="30">30分钟前</option><option value="60">1小时前</option><option value="1440">1天前</option><option value="-1">自定义</option></select>
                         <button class="btn-submit" onclick="createTask()">＋ 添加</button>
+                        <button class="btn-submit" onclick="showTaskCreateDialog()" title="详细创建">📝 详细</button>
                     </div>
                     <div class="tag-select-row" id="quickAddTags"></div>
+                    <div class="custom-reminder-row hidden" id="quickCustomReminder">
+                        <label>自定义提醒时间</label>
+                        <input type="datetime-local" id="quickReminderDatetime">
+                    </div>
                 </div>
                 <div class="task-list" id="taskList"></div>
             </div>
@@ -205,6 +215,17 @@ require_once __DIR__ . '/config.php';
                 </div>
             </div>
 
+            <!-- 打卡视图 -->
+            <div id="habitsView" class="hidden">
+                <div class="habits-toolbar">
+                    <div class="habits-stats" id="habitsStats"></div>
+                    <button class="btn-submit" onclick="showHabitDialog()">＋ 新建习惯</button>
+                </div>
+                <div class="habits-trend" id="habitsTrend"></div>
+                <div class="habits-grid" id="habitsGrid"></div>
+                <div class="habit-detail-panel hidden" id="habitDetailPanel"></div>
+            </div>
+
             <!-- 每日回顾 -->
             <div id="reviewView" class="hidden">
                 <div class="review-grid" id="reviewGrid"></div>
@@ -241,7 +262,7 @@ require_once __DIR__ . '/config.php';
 <!-- 清单分类弹窗 -->
 <div id="categoryDialog" class="modal-overlay" onclick="if(event.target===this)closeCategoryDialog()">
     <div class="modal-box">
-        <h3 id="categoryDialogTitle">新建清单</h3>
+        <h3 id="categoryDialogTitle">新建清单</h3><span class="modal-close" onclick="closeCategoryDialog()">✕</span>
         <input type="hidden" id="editCategoryId" value="">
         <div class="edit-field"><label>清单名称</label><input type="text" id="categoryNameInput" placeholder="例如：项目、阅读..."></div>
         <div class="edit-field">
@@ -263,7 +284,7 @@ require_once __DIR__ . '/config.php';
 <!-- 标签弹窗 -->
 <div id="tagDialog" class="modal-overlay" onclick="if(event.target===this)closeTagDialog()">
     <div class="modal-box">
-        <h3 id="tagDialogTitle">新建标签</h3>
+        <h3 id="tagDialogTitle">新建标签</h3><span class="modal-close" onclick="closeTagDialog()">✕</span>
         <input type="hidden" id="editTagId" value="">
         <div class="edit-field"><label>标签名称</label><input type="text" id="tagNameInput" placeholder="例如：提升、生活..."></div>
         <div class="edit-field"><label>颜色</label><input type="color" id="tagColorInput" value="#95A5A6" style="width:40px;height:32px;border:none;cursor:pointer;padding:0"></div>
@@ -271,12 +292,89 @@ require_once __DIR__ . '/config.php';
     </div>
 </div>
 
+<!-- 详细任务创建弹窗 -->
+<div id="taskCreateDialog" class="modal-overlay" onclick="if(event.target===this)closeTaskCreate()">
+    <div class="modal-box modal-wide">
+        <h3>📝 新建任务</h3><span class="modal-close" onclick="closeTaskCreate()">✕</span>
+        <div class="edit-field"><label>标题 *</label><input type="text" id="createTaskTitle" placeholder="任务标题"></div>
+        <div class="edit-field"><label>描述</label><textarea id="createTaskDescription" placeholder="任务的详细描述，支持换行..." rows="3"></textarea></div>
+        <div class="edit-row">
+            <div class="edit-field"><label>清单</label><select id="createTaskCategory"></select></div>
+            <div class="edit-field"><label>优先级</label><select id="createTaskPriority"><option value="high">🔴 高</option><option value="medium" selected>🟡 中</option><option value="low">🟢 低</option></select></div>
+        </div>
+        <div class="edit-row">
+            <div class="edit-field"><label>截止日期</label><input type="date" id="createTaskDate" value="<?php echo date('Y-m-d'); ?>"></div>
+            <div class="edit-field"><label>截止时间</label><input type="time" id="createTaskTime" value="09:00"></div>
+        </div>
+        <div class="edit-row">
+            <div class="edit-field"><label>提醒方式</label><select id="createTaskReminder" onchange="toggleCreateReminderCustom()"><option value="0">准时</option><option value="5">5分钟前</option><option value="15">15分钟前</option><option value="30">30分钟前</option><option value="60">1小时前</option><option value="1440">1天前</option><option value="-1">自定义</option></select></div>
+            <div class="edit-field hidden" id="createReminderCustomField"><label>自定义提醒时间</label><input type="datetime-local" id="createReminderDatetime"></div>
+        </div>
+        <!-- 重复任务 -->
+        <div class="edit-section">
+            <div class="edit-section-header"><label>🔁 重复任务</label></div>
+            <div class="edit-row">
+                <div class="edit-field"><label>重复类型</label><select id="createRecurrenceType" onchange="toggleCreateRecurrence()">
+                    <option value="">不重复</option>
+                    <option value="daily">每天</option>
+                    <option value="weekly">每周</option>
+                    <option value="monthly">每月</option>
+                    <option value="yearly">每年</option>
+                </select></div>
+                <div class="edit-field hidden" id="createRecurrenceEndField"><label>重复截止</label><input type="date" id="createRecurrenceEnd"></div>
+            </div>
+            <div class="edit-row hidden" id="createRecurrenceStartField">
+                <div class="edit-field"><label>开始日期</label><input type="date" id="createRecurrenceStart"></div>
+            </div>
+            <div class="edit-row hidden" id="createWeeklyDays">
+                <div class="edit-field"><label>每周几</label>
+                    <div class="weekday-picker" id="createWeekdayPicker">
+                        <label class="weekday-btn"><input type="checkbox" value="1"> 一</label>
+                        <label class="weekday-btn"><input type="checkbox" value="2"> 二</label>
+                        <label class="weekday-btn"><input type="checkbox" value="3"> 三</label>
+                        <label class="weekday-btn"><input type="checkbox" value="4"> 四</label>
+                        <label class="weekday-btn"><input type="checkbox" value="5"> 五</label>
+                        <label class="weekday-btn"><input type="checkbox" value="6"> 六</label>
+                        <label class="weekday-btn"><input type="checkbox" value="7"> 日</label>
+                    </div>
+                </div>
+            </div>
+            <div class="edit-row hidden" id="createMonthlyDay">
+                <div class="edit-field"><label>每月几号</label><input type="number" id="createRecurrenceDay" min="1" max="31" value="1" style="width:80px"></div>
+            </div>
+            <div class="edit-row hidden" id="createYearlyDate">
+                <div class="edit-field"><label>每年几月几日</label>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <input type="number" id="createRecurrenceMonth" min="1" max="12" value="1" style="width:60px" placeholder="月">
+                        <span>月</span>
+                        <input type="number" id="createRecurrenceDayY" min="1" max="31" value="1" style="width:60px" placeholder="日">
+                        <span>日</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="edit-field"><label>标签</label><div class="tag-edit-row" id="createTaskTags"></div></div>
+        <div class="edit-field"><label>备注</label><textarea id="createTaskNotes" placeholder="补充说明..." rows="2"></textarea></div>
+        <div class="edit-field">
+            <label>附件</label>
+            <div class="attach-zone">
+                <input type="file" id="createTaskFile" multiple style="display:none" onchange="handleCreateFileSelect()">
+                <button class="btn-attach" onclick="document.getElementById('createTaskFile').click()">📎 选择文件 (PDF可在线预览)</button>
+                <span class="attach-hint">支持图片、PDF、文档等，单文件最大 20MB</span>
+                <div class="attach-list" id="createAttachList"></div>
+            </div>
+        </div>
+        <div class="modal-actions"><button class="btn-cancel" onclick="closeTaskCreate()">取消</button><button class="btn-save" onclick="saveTaskCreate()">创建任务</button></div>
+    </div>
+</div>
+
 <!-- 任务编辑弹窗 -->
 <div id="taskEditDialog" class="modal-overlay" onclick="if(event.target===this)closeTaskEdit()">
-    <div class="modal-box">
-        <h3>✏️ 编辑任务</h3>
+    <div class="modal-box modal-wide">
+        <h3>✏️ 编辑任务</h3><span class="modal-close" onclick="closeTaskEdit()">✕</span>
         <input type="hidden" id="editTaskId" value="">
         <div class="edit-field"><label>标题</label><input type="text" id="editTaskTitle"></div>
+        <div class="edit-field"><label>描述</label><textarea id="editTaskDescription" placeholder="任务详细描述..." rows="3"></textarea></div>
         <div class="edit-row">
             <div class="edit-field"><label>清单</label><select id="editTaskCategory"></select></div>
             <div class="edit-field"><label>状态</label><select id="editTaskStatus"><option value="todo">📝 待办</option><option value="doing">🔄 处理中</option><option value="done">✅ 已完成</option></select></div>
@@ -286,9 +384,69 @@ require_once __DIR__ . '/config.php';
             <div class="edit-field"><label>截止日期</label><input type="date" id="editTaskDate"></div>
             <div class="edit-field"><label>截止时间</label><input type="time" id="editTaskTime"></div>
         </div>
-        <div class="edit-row"><div class="edit-field"><label>提醒偏移</label><select id="editTaskReminder"><option value="0">准时</option><option value="5">5分钟前</option><option value="15">15分钟前</option><option value="30">30分钟前</option><option value="60">1小时前</option><option value="1440">1天前</option></select></div></div>
+        <div class="edit-row">
+            <div class="edit-field"><label>提醒方式</label><select id="editTaskReminder" onchange="toggleEditReminderCustom()"><option value="0">准时</option><option value="5">5分钟前</option><option value="15">15分钟前</option><option value="30">30分钟前</option><option value="60">1小时前</option><option value="1440">1天前</option><option value="-1">自定义</option></select></div>
+            <div class="edit-field hidden" id="editReminderCustomField"><label>自定义提醒时间</label><input type="datetime-local" id="editReminderDatetime"></div>
+        </div>
+        <!-- 重复任务 -->
+        <div class="edit-section">
+            <div class="edit-section-header"><label>🔁 重复任务</label></div>
+            <div class="edit-row">
+                <div class="edit-field"><label>重复类型</label><select id="editRecurrenceType" onchange="toggleEditRecurrence()">
+                    <option value="">不重复</option>
+                    <option value="daily">每天</option>
+                    <option value="weekly">每周</option>
+                    <option value="monthly">每月</option>
+                    <option value="yearly">每年</option>
+                </select></div>
+                <div class="edit-field hidden" id="editRecurrenceEndField"><label>重复截止</label><input type="date" id="editRecurrenceEnd"></div>
+            </div>
+            <div class="edit-row hidden" id="editRecurrenceStartField">
+                <div class="edit-field"><label>开始日期</label><input type="date" id="editRecurrenceStart"></div>
+            </div>
+            <div class="edit-row hidden" id="editWeeklyDays">
+                <div class="edit-field"><label>每周几</label>
+                    <div class="weekday-picker" id="editWeekdayPicker">
+                        <label class="weekday-btn"><input type="checkbox" value="1"> 一</label>
+                        <label class="weekday-btn"><input type="checkbox" value="2"> 二</label>
+                        <label class="weekday-btn"><input type="checkbox" value="3"> 三</label>
+                        <label class="weekday-btn"><input type="checkbox" value="4"> 四</label>
+                        <label class="weekday-btn"><input type="checkbox" value="5"> 五</label>
+                        <label class="weekday-btn"><input type="checkbox" value="6"> 六</label>
+                        <label class="weekday-btn"><input type="checkbox" value="7"> 日</label>
+                    </div>
+                </div>
+            </div>
+            <div class="edit-row hidden" id="editMonthlyDay">
+                <div class="edit-field"><label>每月几号</label><input type="number" id="editRecurrenceDay" min="1" max="31" value="1" style="width:80px"></div>
+            </div>
+            <div class="edit-row hidden" id="editYearlyDate">
+                <div class="edit-field"><label>每年几月几日</label>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <input type="number" id="editRecurrenceMonth" min="1" max="12" value="1" style="width:60px" placeholder="月">
+                        <span>月</span>
+                        <input type="number" id="editRecurrenceDayY" min="1" max="31" value="1" style="width:60px" placeholder="日">
+                        <span>日</span>
+                    </div>
+                </div>
+            </div>
+        </div>
         <div class="edit-field"><label>标签</label><div class="tag-edit-row" id="editTaskTags"></div></div>
         <div class="edit-field"><label>备注</label><textarea id="editTaskNotes" placeholder="任务描述..."></textarea></div>
+        <!-- 子任务 -->
+        <div class="edit-section">
+            <div class="edit-section-header"><label>📋 子任务</label><button class="btn-small" onclick="addSubtask()">＋ 添加子任务</button></div>
+            <div class="subtask-list" id="editSubtaskList"></div>
+        </div>
+        <!-- 附件 -->
+        <div class="edit-field">
+            <label>📎 附件</label>
+            <div class="attach-zone">
+                <input type="file" id="editTaskFile" multiple style="display:none" onchange="handleEditFileSelect()">
+                <button class="btn-attach" onclick="document.getElementById('editTaskFile').click()">选择文件</button>
+                <div class="attach-list" id="editAttachList"></div>
+            </div>
+        </div>
         <div class="modal-actions"><button class="btn-cancel" onclick="closeTaskEdit()">取消</button><button class="btn-save" onclick="saveTaskEdit()">保存</button></div>
     </div>
 </div>
@@ -296,7 +454,7 @@ require_once __DIR__ . '/config.php';
 <!-- 修改密码弹窗 -->
 <div id="passwordDialog" class="modal-overlay" onclick="if(event.target===this)closePasswordDialog()">
     <div class="modal-box">
-        <h3>🔑 修改密码</h3>
+        <h3>🔑 修改密码</h3><span class="modal-close" onclick="closePasswordDialog()">✕</span>
         <div class="edit-field"><label>当前密码</label><input type="password" id="oldPassword" placeholder="当前密码"></div>
         <div class="edit-field"><label>新密码</label><input type="password" id="newPassword" placeholder="新密码（至少6位）"></div>
         <div class="edit-field"><label>确认新密码</label><input type="password" id="confirmPassword" placeholder="再次输入"></div>
@@ -304,10 +462,54 @@ require_once __DIR__ . '/config.php';
     </div>
 </div>
 
+<!-- 打卡习惯弹窗 -->
+<div id="habitDialog" class="modal-overlay" onclick="if(event.target===this)closeHabitDialog()">
+    <div class="modal-box">
+        <h3 id="habitDialogTitle">新建打卡习惯</h3><span class="modal-close" onclick="closeHabitDialog()">✕</span>
+        <input type="hidden" id="editHabitId" value="">
+        <div class="edit-field"><label>习惯名称</label><input type="text" id="habitNameInput" placeholder="例如：晨跑、阅读..."></div>
+        <div class="edit-row">
+            <div class="edit-field"><label>图标</label>
+                <div class="icon-options" id="habitIconOptions">
+                    <span class="icon-option selected" data-icon="📌" onclick="pickHabitIcon('📌',this)">📌</span>
+                    <span class="icon-option" data-icon="🏃" onclick="pickHabitIcon('🏃',this)">🏃</span>
+                    <span class="icon-option" data-icon="📖" onclick="pickHabitIcon('📖',this)">📖</span>
+                    <span class="icon-option" data-icon="💪" onclick="pickHabitIcon('💪',this)">💪</span>
+                    <span class="icon-option" data-icon="🧘" onclick="pickHabitIcon('🧘',this)">🧘</span>
+                    <span class="icon-option" data-icon="💧" onclick="pickHabitIcon('💧',this)">💧</span>
+                    <span class="icon-option" data-icon="🍎" onclick="pickHabitIcon('🍎',this)">🍎</span>
+                    <span class="icon-option" data-icon="✍️" onclick="pickHabitIcon('✍️',this)">✍️</span>
+                    <span class="icon-option" data-icon="🎵" onclick="pickHabitIcon('🎵',this)">🎵</span>
+                    <span class="icon-option" data-icon="🌱" onclick="pickHabitIcon('🌱',this)">🌱</span>
+                    <span class="icon-option" data-icon="💤" onclick="pickHabitIcon('💤',this)">💤</span>
+                    <span class="icon-option" data-icon="🎯" onclick="pickHabitIcon('🎯',this)">🎯</span>
+                </div>
+            </div>
+        </div>
+        <div class="edit-field">
+            <label>颜色</label>
+            <input type="color" id="habitColorInput" value="#4A90D9" style="width:50px;height:34px;border:none;padding:0;cursor:pointer">
+        </div>
+        <div class="edit-field">
+            <label>打卡日</label>
+            <div class="weekday-select" id="habitWeekdays">
+                <span class="wday-chip selected" data-day="1" onclick="toggleHabitDay(this)">一</span>
+                <span class="wday-chip selected" data-day="2" onclick="toggleHabitDay(this)">二</span>
+                <span class="wday-chip selected" data-day="3" onclick="toggleHabitDay(this)">三</span>
+                <span class="wday-chip selected" data-day="4" onclick="toggleHabitDay(this)">四</span>
+                <span class="wday-chip selected" data-day="5" onclick="toggleHabitDay(this)">五</span>
+                <span class="wday-chip selected" data-day="6" onclick="toggleHabitDay(this)">六</span>
+                <span class="wday-chip selected" data-day="7" onclick="toggleHabitDay(this)">日</span>
+            </div>
+        </div>
+        <div class="modal-actions"><button class="btn-cancel" onclick="closeHabitDialog()">取消</button><button class="btn-save" onclick="saveHabit()">保存</button></div>
+    </div>
+</div>
+
 <!-- 提醒设置弹窗 -->
 <div id="settingsDialog" class="modal-overlay" onclick="if(event.target===this)closeSettings()">
     <div class="modal-box">
-        <h3>⚙️ 提醒设置</h3>
+        <h3>⚙️ 提醒设置</h3><span class="modal-close" onclick="closeSettings()">✕</span>
         <div class="settings-section">
             <h4>💻 本地提醒</h4>
             <div class="settings-row"><label>🔔 声音提醒</label><span class="toggle-switch on" id="toggleSound" onclick="toggleSetting('sound')"></span></div>

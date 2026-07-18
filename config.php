@@ -13,7 +13,7 @@
  *   6. 提供统一的 JSON 响应、日志记录等工具函数
  *   7. 自动数据库迁移（v1→v2→v3）
  *
- * @version  1.0.0
+ * @version  2.2.7
  * @date     2026-07-18
  * =============================================================================
  */
@@ -71,13 +71,19 @@ if (session_status() === PHP_SESSION_NONE) {
 $config = [
     // 应用基本信息
     'app_name'    => '任务管理系统',
-    'app_version' => '1.0.0',
+    'app_version' => '2.2.7',
 
     // SQLite 数据库文件路径（存放在 data 目录下，确保该目录可写）
+    // 外网部署建议移到 Web 根目录之外，例如：
+    // 'db_path'  => '/home/www-data/todolist_data/todolist.db',
     'db_path'     => __DIR__ . '/data/todolist.db',
 
     // 日志文件路径
     'log_path'    => __DIR__ . '/data/app.log',
+
+    // SMTP 密码加密密钥（部署后务必修改为随机字符串！）
+    // 生成方法：php -r "echo bin2hex(random_bytes(32));"
+    'encrypt_key' => 'todolist-default-key-change-on-deploy',
 ];
 
 
@@ -257,6 +263,59 @@ function initDatabase($db) {
         )
     ");
 
+    // ========================
+    // 任务附件表（v6.0 新增）
+    // ========================
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS task_attachments (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL,
+            task_id     INTEGER NOT NULL,
+            filename    TEXT    NOT NULL,
+            orig_name   TEXT    NOT NULL,
+            file_size   INTEGER NOT NULL DEFAULT 0,
+            file_type   TEXT    NOT NULL DEFAULT '',
+            created_at  DATETIME NOT NULL DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        )
+    ");
+
+    // ========================
+    // 打卡习惯表（v6.0 新增）
+    // ========================
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS habits (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL,
+            name        TEXT    NOT NULL,
+            icon        TEXT    NOT NULL DEFAULT '📌',
+            color       TEXT    NOT NULL DEFAULT '#4A90D9',
+            target_days TEXT    NOT NULL DEFAULT '1,2,3,4,5,6,7',
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            is_archived INTEGER NOT NULL DEFAULT 0,
+            created_at  DATETIME NOT NULL DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    ");
+
+    // ========================
+    // 打卡日志表（v6.0 新增）
+    // ========================
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS habit_logs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            habit_id    INTEGER NOT NULL,
+            user_id     INTEGER NOT NULL,
+            check_date  DATE    NOT NULL,
+            note        TEXT    DEFAULT '',
+            created_at  DATETIME NOT NULL DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY (habit_id) REFERENCES habits(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE(habit_id, check_date)
+        )
+    ");
+
 
     // ========================
     // 跨版本自动迁移
@@ -371,6 +430,69 @@ function initDatabase($db) {
         }
     } catch (Exception $e) { /* 迁移已处理 */ }
 
+    // v6.0 迁移：添加 parent_id（子任务）、description（描述）、reminder_custom（自定义提醒时间）
+    try {
+        $cols = $db->query("PRAGMA table_info(tasks)")->fetchAll();
+        $hasParentId = false;
+        $hasDescription = false;
+        $hasReminderCustom = false;
+        foreach ($cols as $col) {
+            if ($col['name'] === 'parent_id') { $hasParentId = true; }
+            if ($col['name'] === 'description') { $hasDescription = true; }
+            if ($col['name'] === 'reminder_custom') { $hasReminderCustom = true; }
+        }
+        if (!$hasParentId) {
+            $db->exec("ALTER TABLE tasks ADD COLUMN parent_id INTEGER DEFAULT NULL");
+        }
+        if (!$hasDescription) {
+            $db->exec("ALTER TABLE tasks ADD COLUMN description TEXT DEFAULT ''");
+        }
+        if (!$hasReminderCustom) {
+            $db->exec("ALTER TABLE tasks ADD COLUMN reminder_custom DATETIME DEFAULT NULL");
+        }
+    } catch (Exception $e) { /* 迁移已处理 */ }
+
+    // v7.0 迁移：添加 recurrence_type（重复类型）、recurrence_rule（重复规则）、recurrence_end（重复截止日期）、completion_count（完成次数）
+    try {
+        $cols = $db->query("PRAGMA table_info(tasks)")->fetchAll();
+        $hasRecurType = false;
+        $hasRecurRule = false;
+        $hasRecurEnd = false;
+        $hasCompCount = false;
+        foreach ($cols as $col) {
+            if ($col['name'] === 'recurrence_type') { $hasRecurType = true; }
+            if ($col['name'] === 'recurrence_rule') { $hasRecurRule = true; }
+            if ($col['name'] === 'recurrence_end') { $hasRecurEnd = true; }
+            if ($col['name'] === 'completion_count') { $hasCompCount = true; }
+        }
+        if (!$hasRecurType) {
+            $db->exec("ALTER TABLE tasks ADD COLUMN recurrence_type TEXT DEFAULT ''");
+        }
+        if (!$hasRecurRule) {
+            $db->exec("ALTER TABLE tasks ADD COLUMN recurrence_rule TEXT DEFAULT ''");
+        }
+        if (!$hasRecurEnd) {
+            $db->exec("ALTER TABLE tasks ADD COLUMN recurrence_end DATETIME DEFAULT NULL");
+        }
+        if (!$hasCompCount) {
+            $db->exec("ALTER TABLE tasks ADD COLUMN completion_count INTEGER NOT NULL DEFAULT 0");
+        }
+    } catch (Exception $e) { /* 迁移已处理 */ }
+
+    // v8.0 迁移：添加 recurrence_start（重复任务开始日期），已有任务的开始日期回填为 created_at
+    try {
+        $cols = $db->query("PRAGMA table_info(tasks)")->fetchAll();
+        $hasRecurStart = false;
+        foreach ($cols as $col) {
+            if ($col['name'] === 'recurrence_start') { $hasRecurStart = true; break; }
+        }
+        if (!$hasRecurStart) {
+            $db->exec("ALTER TABLE tasks ADD COLUMN recurrence_start DATETIME DEFAULT NULL");
+            // 已有重复任务的开始日期回填为 created_at
+            $db->exec("UPDATE tasks SET recurrence_start = created_at WHERE recurrence_type != '' AND recurrence_type IS NOT NULL AND recurrence_start IS NULL");
+        }
+    } catch (Exception $e) { /* 迁移已处理 */ }
+
 
     // ========================
     // 创建索引
@@ -388,6 +510,12 @@ function initDatabase($db) {
     $db->exec("CREATE INDEX IF NOT EXISTS idx_task_tags_tag         ON task_tags(tag_id)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_pomodoro_user         ON pomodoro_sessions(user_id)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_pomodoro_task         ON pomodoro_sessions(task_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_attachments_user      ON task_attachments(user_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_tasks_parent          ON tasks(parent_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_habits_user           ON habits(user_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_habit_logs_habit      ON habit_logs(habit_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_habit_logs_date       ON habit_logs(check_date)");
 
     // ========================
     // 插入默认分类（仅在分类表为空时）
@@ -539,6 +667,48 @@ function sendMailSMTP($smtp, $to, $subject, $body) {
         }
         return ['success' => false, 'message' => $e->getMessage()];
     }
+}
+
+// -------------------- 数据加密（SMTP 密码等敏感信息） --------------------
+
+/**
+ * AES-256-CBC 加密敏感数据
+ *
+ * 加密结果携带 "AES:" 前缀以区分明文数据，兼容旧版明文存储。
+ *
+ * @param string $data 明文数据
+ * @param array  $config 应用配置（需包含 encrypt_key）
+ * @return string 加密后的字符串（"AES:" + base64）
+ */
+function encryptSensitive($data, $config) {
+    if (empty($data)) return '';
+    $key = hash('sha256', $config['encrypt_key'], true);
+    $iv  = openssl_random_pseudo_bytes(16);
+    $encrypted = openssl_encrypt($data, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
+    if ($encrypted === false) return $data; // 加密失败则回退明文（不应发生）
+    return 'AES:' . base64_encode($iv . $encrypted);
+}
+
+/**
+ * 解密敏感数据
+ *
+ * 自动检测 "AES:" 前缀，若无则按明文返回（兼容旧数据）。
+ *
+ * @param string $data 加密或明文数据
+ * @param array  $config 应用配置
+ * @return string 明文数据
+ */
+function decryptSensitive($data, $config) {
+    if (empty($data)) return '';
+    // 兼容旧版明文存储（没有 "AES:" 前缀的视为明文）
+    if (substr($data, 0, 4) !== 'AES:') return $data;
+    $key  = hash('sha256', $config['encrypt_key'], true);
+    $data = base64_decode(substr($data, 4));
+    if ($data === false || strlen($data) < 16) return '';
+    $iv        = substr($data, 0, 16);
+    $encrypted = substr($data, 16);
+    $result    = openssl_decrypt($encrypted, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
+    return ($result === false) ? '' : $result;
 }
 
 // -------------------- 工具函数 --------------------

@@ -13,7 +13,7 @@
  *   - 新增搜索接口（任务标题/备注/标签）
  *   - 列表任务按「已过期 / 今天 / 明天 / 未来 / 无日期」分组
  *
- * @version  1.0.0
+ * @version  2.2.7
  * @date     2026-07-18
  * =============================================================================
  */
@@ -21,6 +21,266 @@
 require_once __DIR__ . '/config.php';
 
 date_default_timezone_set('Asia/Shanghai');
+
+// -------------------- 重复任务辅助函数 --------------------
+
+/**
+ * 根据重复规则计算下一次执行日期
+ *
+ * @param string $dueDatetime  当前到期时间 (YYYY-MM-DD HH:MM 或 YYYY-MM-DD)
+ * @param string $recurType    重复类型: daily / weekly / monthly / yearly
+ * @param string $recurRule    JSON 规则字符串
+ *   - daily:   {"interval":2}    每N天
+ *   - weekly:  {"days":[4,7]}    每周四和周日 (1=周一, 7=周日)
+ *   - monthly: {"day":5}         每月5号
+ *   - yearly:  {"month":3,"day":15}  每年3月15日
+ * @return DateTime|null  下一次到期时间，计算失败返回 null
+ */
+function computeNextOccurrence($dueDatetime, $recurType, $recurRule) {
+    if (empty($dueDatetime) || empty($recurType)) return null;
+
+    try {
+        $dt   = new DateTime($dueDatetime);
+        $rule = json_decode($recurRule, true);
+        if (!is_array($rule)) $rule = [];
+
+        switch ($recurType) {
+            case 'daily':
+                $interval = max(1, intval($rule['interval'] ?? 1));
+                $dt->modify("+{$interval} days");
+                break;
+
+            case 'weekly':
+                $days = $rule['days'] ?? [];
+                if (!is_array($days) || empty($days)) {
+                    $dt->modify('+1 week');
+                } else {
+                    $days = array_map('intval', $days);
+                    sort($days);
+                    $curDay = (int)$dt->format('N'); // 1=Mon ... 7=Sun
+                    $found = false;
+                    foreach ($days as $d) {
+                        if ($d > $curDay) {
+                            $dt->modify('+' . ($d - $curDay) . ' days');
+                            $found = true;
+                            break;
+                        }
+                    }
+                    if (!$found) {
+                        $dt->modify('+' . (7 - $curDay + $days[0]) . ' days');
+                    }
+                }
+                break;
+
+            case 'monthly':
+                $day = max(1, min(31, intval($rule['day'] ?? 1)));
+                // 先跳到下个月
+                $dt->modify('first day of next month');
+                $lastDay = (int)$dt->format('t');
+                $dt->setDate($dt->format('Y'), $dt->format('m'), min($day, $lastDay));
+                break;
+
+            case 'yearly':
+                $month = max(1, min(12, intval($rule['month'] ?? 1)));
+                $day   = max(1, min(31, intval($rule['day'] ?? 1)));
+                $dt->modify('+1 year');
+                $lastDay = (int)$dt->setDate($dt->format('Y'), $month, 1)->format('t');
+                $dt->setDate($dt->format('Y'), $month, min($day, $lastDay));
+                break;
+
+            default:
+                return null;
+        }
+
+        return $dt;
+    } catch (\Exception $e) {
+        return null;
+    }
+}
+
+/**
+ * 根据重复规则计算上一次执行日期（computeNextOccurrence 的逆向）
+ *
+ * @param string $dueDatetime  当前到期时间 (YYYY-MM-DD HH:MM 或 YYYY-MM-DD)
+ * @param string $recurType    重复类型: daily / weekly / monthly / yearly
+ * @param string $recurRule    JSON 规则字符串
+ * @return DateTime|null  上一次到期时间，计算失败返回 null
+ */
+function computePrevOccurrence($dueDatetime, $recurType, $recurRule) {
+    if (empty($dueDatetime) || empty($recurType)) return null;
+
+    try {
+        $dt   = new DateTime($dueDatetime);
+        $rule = json_decode($recurRule, true);
+        if (!is_array($rule)) $rule = [];
+
+        switch ($recurType) {
+            case 'daily':
+                $interval = max(1, intval($rule['interval'] ?? 1));
+                $dt->modify("-{$interval} days");
+                break;
+
+            case 'weekly':
+                $days = $rule['days'] ?? [];
+                if (!is_array($days) || empty($days)) {
+                    $dt->modify('-1 week');
+                } else {
+                    $days = array_map('intval', $days);
+                    sort($days);
+                    $curDay = (int)$dt->format('N'); // 1=Mon ... 7=Sun
+                    $found = false;
+                    // 找最近的前一个匹配日
+                    for ($i = count($days) - 1; $i >= 0; $i--) {
+                        if ($days[$i] < $curDay) {
+                            $dt->modify('-' . ($curDay - $days[$i]) . ' days');
+                            $found = true;
+                            break;
+                        }
+                    }
+                    if (!$found) {
+                        // 回退到上一周的最后一天
+                        $lastDayOfWeek = $days[count($days) - 1];
+                        $dt->modify('-' . (7 - $lastDayOfWeek + $curDay) . ' days');
+                    }
+                }
+                break;
+
+            case 'monthly':
+                $day = max(1, min(31, intval($rule['day'] ?? 1)));
+                $dt->modify('last day of previous month');
+                $lastDay = (int)$dt->format('t');
+                $dt->setDate($dt->format('Y'), $dt->format('m'), min($day, $lastDay));
+                break;
+
+            case 'yearly':
+                $month = max(1, min(12, intval($rule['month'] ?? 1)));
+                $day   = max(1, min(31, intval($rule['day'] ?? 1)));
+                $dt->modify('-1 year');
+                $lastDay = (int)$dt->setDate($dt->format('Y'), $month, 1)->format('t');
+                $dt->setDate($dt->format('Y'), $month, min($day, $lastDay));
+                break;
+
+            default:
+                return null;
+        }
+
+        return $dt;
+    } catch (\Exception $e) {
+        return null;
+    }
+}
+
+/**
+ * 将重复任务在指定日期范围内虚拟展开
+ * 从每条任务当前的 due_datetime 开始逐次推算后续发生日期，
+ * 落在 $rangeStart ~ $rangeEnd 之间的生成虚拟实例（_virtual=1）。
+ *
+ * 如果 due_datetime 超出视图范围（未来），会先逆向回退查找，
+ * 确保过去已发生的重复实例也能在月历/周历中显示。
+ *
+ * 这样月历/周历/日历视图就能看到重复任务的所有过去和未来实例，
+ * 而不必等到用户完成当前实例后才生成下一期。
+ *
+ * @param array  $tasks      已加载的未完成重复任务数组
+ * @param string $rangeStart 范围起始 Y-m-d（含）
+ * @param string $rangeEnd   范围结束 Y-m-d（不含）
+ * @param array  &$seenKeys  去重集合引用 {title|due_date => true}，会就地更新
+ * @return array 虚拟实例数组
+ */
+function expandRecurringTasks($tasks, $rangeStart, $rangeEnd, &$seenKeys = []) {
+    $virtuals = [];
+    $maxGlobal = 600;
+
+    try {
+        $rs = new DateTime($rangeStart);
+        $re = new DateTime($rangeEnd);
+    } catch (\Exception $e) {
+        return [];
+    }
+
+    foreach ($tasks as $task) {
+        if (empty($task['recurrence_type'])) continue;
+        if (!empty($task['is_completed'])) continue;
+        if (empty($task['due_datetime'])) continue;
+
+        // 安全解析 recurrence_end
+        $recurEnd = null;
+        if (!empty($task['recurrence_end'])) {
+            try { $recurEnd = new DateTime($task['recurrence_end']); } catch (\Exception $e) {}
+        }
+        // 安全解析 recurrence_start（开始日期），未设置则回退用 created_at
+        $recurStart = null;
+        $recurStartSrc = !empty($task['recurrence_start']) ? $task['recurrence_start'] : ($task['created_at'] ?? null);
+        if ($recurStartSrc) {
+            try { $recurStart = new DateTime($recurStartSrc); } catch (\Exception $e) {}
+        }
+        // 安全解析当前 due_datetime
+        try {
+            $current = new DateTime($task['due_datetime']);
+        } catch (\Exception $e) {
+            continue; // 日期格式异常，跳过该任务
+        }
+
+        // 如果 due_datetime 超出视图范围（在未来），逆向回退找到范围附近的锚点
+        if ($current >= $re) {
+            $backIter = 0;
+            while ($backIter < 300) {
+                $prev = computePrevOccurrence(
+                    $current->format('Y-m-d H:i'),
+                    $task['recurrence_type'],
+                    $task['recurrence_rule']
+                );
+                if (!$prev) break;
+                // v2.2.5: 停止于开始日期之前（不再无限往前展开）
+                if ($recurStart && $prev < $recurStart) break;
+                if ($prev < $rs) {
+                    // $prev 是范围前的一次发生，从它开始正向推算，
+                    // 第一个 computeNextOccurrence 就会命中范围内最早的一次
+                    $current = $prev;
+                    break;
+                }
+                $current = $prev;
+                $backIter++;
+            }
+            // 此时 $current 是刚好在 $rs 之前的一次发生，
+            // 正向迭代时第一个 next 就会落在范围内
+        }
+
+        // 正向迭代：从锚点开始推算未来发生日期
+        $iter = 0;
+        while ($iter < 300) {
+            $next = computeNextOccurrence(
+                $current->format('Y-m-d H:i'),
+                $task['recurrence_type'],
+                $task['recurrence_rule']
+            );
+            if (!$next) break;
+            if ($recurEnd && $next > $recurEnd) break;
+            if ($next >= $re) break;  // 超出查询范围
+
+            if ($next >= $rs) {
+                $key = ($task['title'] ?? '') . '|' . $next->format('Y-m-d');
+                if (!isset($seenKeys[$key])) {
+                    $seenKeys[$key] = true;
+                    $vt = $task;
+                    $vt['due_datetime']  = $next->format('Y-m-d H:i');
+                    $vt['due_date']      = $next->format('Y-m-d');
+                    $vt['_virtual']      = 1;
+                    $vt['is_completed']  = 0; // 虚拟实例始终未完成
+                    $vt['id']            = null;
+                    $virtuals[]          = $vt;
+                }
+            }
+
+            $current = $next;
+            $iter++;
+            if (count($virtuals) >= $maxGlobal) break;
+        }
+        if (count($virtuals) >= $maxGlobal) break;
+    }
+
+    return $virtuals;
+}
 
 $action = $_GET['action'] ?? '';
 $method = $_SERVER['REQUEST_METHOD'];
@@ -224,7 +484,8 @@ try {
                 ];
             }
             unset($settings['id'], $settings['user_id'], $settings['updated_at']);
-            $settings['smtp_password'] = !empty($settings['smtp_password']) ? '******' : '';
+            $decrypted = decryptSensitive($settings['smtp_password'], $config);
+            $settings['smtp_password'] = !empty($decrypted) ? '******' : '';
             jsonResponse($settings);
 
         case 'update_settings':
@@ -238,9 +499,15 @@ try {
             $newPassword = $data['smtp_password'] ?? '';
             $finalPassword = '';
             if ($newPassword === '******' || $newPassword === '') {
+                // 用户未修改密码：保留原有值（可能已加密的 AES:... 或旧版明文）
                 $finalPassword = $existing['smtp_password'] ?? '';
+                // 迁移旧版明文密码 → 自动加密
+                if (!empty($finalPassword) && substr($finalPassword, 0, 4) !== 'AES:') {
+                    $finalPassword = encryptSensitive($finalPassword, $config);
+                }
             } else {
-                $finalPassword = $newPassword;
+                // 用户输入了新密码 → 加密存储
+                $finalPassword = encryptSensitive($newPassword, $config);
             }
 
             if ($existing) {
@@ -317,7 +584,7 @@ try {
                 'host'       => $settings['smtp_host'],
                 'port'       => intval($settings['smtp_port']),
                 'username'   => $settings['smtp_username'],
-                'password'   => $settings['smtp_password'],
+                'password'   => decryptSensitive($settings['smtp_password'], $config),
                 'encryption' => $settings['smtp_encryption'],
             ], $to, $subject, $body);
 
@@ -348,18 +615,22 @@ try {
                 jsonResponse(null, 400, '未设置收件人邮箱');
             }
 
-            // v4.0: 使用 reminder_offset 计算实际提醒时间，并排除已删除任务
+            // v6.0: 使用 reminder_offset + reminder_custom 计算提醒时间，并排除已删除任务
             $now = date('Y-m-d H:i');
             $stmt = $db->prepare("
-                SELECT t.title, t.priority, t.due_datetime, t.reminder_offset,
+                SELECT t.title, t.priority, t.due_datetime, t.reminder_offset, t.reminder_custom,
                        c.name AS category_name 
                 FROM tasks t 
                 LEFT JOIN categories c ON t.category_id = c.id 
                 WHERE t.user_id = :uid AND t.is_completed = 0 AND t.is_deleted = 0
-                  AND t.due_datetime IS NOT NULL
-                  AND datetime(t.due_datetime, '-' || t.reminder_offset || ' minutes') <= :now
-                  AND t.due_datetime >= date('now', 'localtime')
-                ORDER BY t.due_datetime ASC
+                  AND (
+                    (t.due_datetime IS NOT NULL AND datetime(t.due_datetime, '-' || t.reminder_offset || ' minutes') <= :now
+                     AND t.due_datetime >= date('now', 'localtime'))
+                    OR
+                    (t.reminder_custom IS NOT NULL AND t.reminder_custom <= :now
+                     AND t.reminder_custom >= date('now', 'localtime'))
+                  )
+                ORDER BY COALESCE(t.reminder_custom, t.due_datetime) ASC
             ");
             $stmt->execute(['uid' => $currentUserId, 'now' => $now]);
             $reminders = $stmt->fetchAll();
@@ -403,7 +674,7 @@ try {
                 'host'       => $settings['smtp_host'],
                 'port'       => intval($settings['smtp_port']),
                 'username'   => $settings['smtp_username'],
-                'password'   => $settings['smtp_password'],
+                'password'   => decryptSensitive($settings['smtp_password'], $config),
                 'encryption' => $settings['smtp_encryption'],
             ], $to, $subject, $body);
 
@@ -533,8 +804,19 @@ try {
 
             // 视图筛选
             if (!empty($calendar_date)) {
-                $sql .= " AND date(t.due_datetime) = :cal_date";
-                $params['cal_date'] = $calendar_date;
+                // 使用 DateTime 计算次日，避免 strtotime('YYYY-MM-DD +1 day') 在 Windows 某些 PHP 版本下解析失败返回 false，导致 date('Y-m-d', false) = '1970-01-01' 使范围筛选永远为空
+                try {
+                    $dt = new DateTime($calendar_date);
+                    $dt->modify('+1 day');
+                    $nextDay = $dt->format('Y-m-d');
+                } catch (\Exception $e) {
+                    // 极端降级：手动拆分计算
+                    $parts = explode('-', $calendar_date);
+                    $nextDay = date('Y-m-d', mktime(0, 0, 0, (int)$parts[1], (int)$parts[2] + 1, (int)$parts[0]));
+                }
+                $sql .= " AND t.due_datetime >= :cal_start AND t.due_datetime < :cal_end";
+                $params['cal_start'] = $calendar_date;
+                $params['cal_end']   = $nextDay;
             } elseif ($filter === 'today') {
                 $sql .= " AND t.is_completed = 0 AND date(t.due_datetime) <= date('now', 'localtime')";
             } elseif ($filter === 'tomorrow') {
@@ -565,13 +847,13 @@ try {
             // 排序
             $priorityOrder = "CASE t.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 END";
             if ($sort_by === 'date_asc') {
-                $sql .= " ORDER BY t.due_datetime ASC NULLS LAST, {$priorityOrder}";
+                $sql .= " ORDER BY CASE WHEN t.due_datetime IS NULL THEN 1 ELSE 0 END, t.due_datetime ASC, {$priorityOrder}";
             } elseif ($sort_by === 'date_desc') {
-                $sql .= " ORDER BY t.due_datetime DESC NULLS LAST, {$priorityOrder}";
+                $sql .= " ORDER BY CASE WHEN t.due_datetime IS NULL THEN 1 ELSE 0 END, t.due_datetime DESC, {$priorityOrder}";
             } elseif ($sort_by === 'priority') {
-                $sql .= " ORDER BY {$priorityOrder}, t.due_datetime ASC NULLS LAST";
+                $sql .= " ORDER BY {$priorityOrder}, CASE WHEN t.due_datetime IS NULL THEN 1 ELSE 0 END, t.due_datetime ASC";
             } else {
-                $sql .= " ORDER BY t.is_completed ASC, {$priorityOrder}, t.due_datetime ASC NULLS LAST, t.created_at DESC";
+                $sql .= " ORDER BY t.is_completed ASC, {$priorityOrder}, CASE WHEN t.due_datetime IS NULL THEN 1 ELSE 0 END, t.due_datetime ASC, t.created_at DESC";
             }
 
             $stmt = $db->prepare($sql);
@@ -580,6 +862,98 @@ try {
 
             // 附加标签
             attachTagsToTasks($tasks, $db);
+
+            // v6.1: 附加子任务计数（父任务在列表中时显示子任务进度）
+            if (!empty($tasks)) {
+                $taskIds = array_map(function($t) { return intval($t['id']); }, $tasks);
+                $idList = implode(',', $taskIds);
+                if (!empty($idList)) {
+                    $subCountStmt = $db->query("
+                        SELECT parent_id, COUNT(*) AS subtask_count,
+                               SUM(CASE WHEN is_completed = 1 THEN 1 ELSE 0 END) AS subtask_done
+                        FROM tasks
+                        WHERE parent_id IN ($idList) AND is_deleted = 0
+                        GROUP BY parent_id
+                    ");
+                    $subCountMap = [];
+                    while ($row = $subCountStmt->fetch()) {
+                        $subCountMap[intval($row['parent_id'])] = $row;
+                    }
+                    foreach ($tasks as &$t) {
+                        $tid = intval($t['id']);
+                        if (isset($subCountMap[$tid])) {
+                            $t['subtask_count'] = intval($subCountMap[$tid]['subtask_count']);
+                            $t['subtask_done'] = intval($subCountMap[$tid]['subtask_done']);
+                        } else {
+                            $t['subtask_count'] = 0;
+                            $t['subtask_done'] = 0;
+                        }
+                    }
+                    unset($t);
+                }
+            }
+
+            // v2.2.1: 虚拟展开重复任务 — 日期筛选视图显示未来所有重复实例
+            $dateFilters = ['calendar_date','today','tomorrow','next7days','upcoming'];
+            if (in_array($filter, $dateFilters, true) || !empty($calendar_date)) {
+                // 确定需要展开的日期范围
+                $todayStr = date('Y-m-d');
+                $expandStart = $todayStr;
+                $expandEnd   = date('Y-m-d', strtotime('+1 year'));
+                if (!empty($calendar_date)) {
+                    // 单天视图
+                    try {
+                        $cd = new DateTime($calendar_date);
+                        $expandStart = $cd->format('Y-m-d');
+                        $expandEnd   = $cd->modify('+1 day')->format('Y-m-d');
+                    } catch (\Exception $e) {
+                        $expandStart = $calendar_date;
+                        $expandEnd   = $calendar_date;
+                    }
+                } elseif ($filter === 'today') {
+                    $expandEnd = date('Y-m-d', strtotime('+1 day'));
+                } elseif ($filter === 'tomorrow') {
+                    $expandStart = date('Y-m-d', strtotime('+1 day'));
+                    $expandEnd   = date('Y-m-d', strtotime('+2 days'));
+                } elseif ($filter === 'next7days') {
+                    $expandEnd = date('Y-m-d', strtotime('+8 days'));
+                } elseif ($filter === 'upcoming') {
+                    $expandStart = date('Y-m-d', strtotime('+1 day'));
+                }
+
+                // 获取所有活跃的重复任务
+                $recurStmt = $db->prepare("
+                    SELECT t.*, c.name AS category_name, c.color AS category_color
+                    FROM tasks t
+                    LEFT JOIN categories c ON t.category_id = c.id
+                    WHERE t.user_id = :uid AND t.is_deleted = 0 AND t.is_completed = 0
+                      AND t.recurrence_type != '' AND t.recurrence_type IS NOT NULL
+                      AND t.due_datetime IS NOT NULL
+                    ORDER BY t.due_datetime ASC
+                ");
+                $recurStmt->execute(['uid' => $currentUserId]);
+                $allRecur = $recurStmt->fetchAll();
+
+                // 构建去重键
+                $seenKeys = [];
+                foreach ($tasks as $t) {
+                    $dd = !empty($t['due_datetime']) ? substr($t['due_datetime'], 0, 10) : '';
+                    $seenKeys[($t['title'] ?? '') . '|' . $dd] = true;
+                }
+                $virtuals = expandRecurringTasks($allRecur, $expandStart, $expandEnd, $seenKeys);
+
+                if (!empty($virtuals)) {
+                    attachTagsToTasks($virtuals, $db);
+                    // 虚拟实例附加到 tasks 数组
+                    $tasks = array_merge($tasks, $virtuals);
+                    // 重新排序：按 due_datetime
+                    usort($tasks, function($a, $b) {
+                        $da = $a['due_datetime'] ?? '9999';
+                        $db = $b['due_datetime'] ?? '9999';
+                        return strcmp($da, $db);
+                    });
+                }
+            }
 
             // 自动分组：按逾期/今天/明天/未来/无日期
             if ($group === 'auto' && in_array($filter, ['all', 'today', 'next7days', 'upcoming', 'inbox', 'search']) && empty($calendar_date)) {
@@ -634,6 +1008,21 @@ try {
             $task = $rows[0];
             // 额外返回标签 ID 列表便于编辑弹窗回显
             $task['tag_ids'] = array_map(function($t){ return intval($t['id']); }, $task['tags'] ?? []);
+            // 附加附件列表
+            $attStmt = $db->prepare("SELECT * FROM task_attachments WHERE task_id = :tid");
+            $attStmt->execute(['tid' => $taskId]);
+            $task['attachments'] = $attStmt->fetchAll();
+            // 附加子任务列表
+            $subStmt = $db->prepare("
+                SELECT t.*, c.name AS category_name, c.color AS category_color
+                FROM tasks t LEFT JOIN categories c ON t.category_id = c.id
+                WHERE t.parent_id = :pid AND t.is_deleted = 0
+                ORDER BY CASE WHEN t.due_datetime IS NULL THEN 1 ELSE 0 END, t.due_datetime ASC
+            ");
+            $subStmt->execute(['pid' => $taskId]);
+            $subtasks = $subStmt->fetchAll();
+            attachTagsToTasks($subtasks, $db);
+            $task['subtasks'] = $subtasks;
             jsonResponse($task);
 
         /**
@@ -649,19 +1038,47 @@ try {
             if ($title === '') jsonResponse(null, 400, '任务标题不能为空');
             if ($catId <= 0) jsonResponse(null, 400, '请选择所属清单');
 
+            $parentId = $data['parent_id'] ?? null;
+            if ($parentId !== null) $parentId = intval($parentId);
+            if ($parentId === 0) $parentId = null;
+
+            $reminderCustom = $data['reminder_custom'] ?? null;
+            if ($reminderCustom !== null && $reminderCustom !== '') {
+                // 验证格式
+                if (!preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/', $reminderCustom)) {
+                    jsonResponse(null, 400, '自定义提醒时间格式无效，应为 YYYY-MM-DD HH:MM');
+                }
+            }
+
+            // 重复任务字段
+            $recurType = trim($data['recurrence_type'] ?? '');
+            $recurType = in_array($recurType, ['daily','weekly','monthly','yearly'], true) ? $recurType : '';
+            $recurRule = $recurType ? (trim($data['recurrence_rule'] ?? '')) : '';
+            $recurEnd  = $recurType ? ($data['recurrence_end'] ?? null) : null;
+            if ($recurEnd !== null && $recurEnd === '') $recurEnd = null;
+            $recurStart = $recurType ? ($data['recurrence_start'] ?? null) : null;
+            if ($recurStart !== null && $recurStart === '') $recurStart = null;
+
             $stmt = $db->prepare("
-                INSERT INTO tasks (user_id, title, category_id, priority, due_datetime, reminder_offset, notes, status) 
-                VALUES (:uid, :title, :category_id, :priority, :due_datetime, :reminder_offset, :notes, :status)
+                INSERT INTO tasks (user_id, title, category_id, priority, due_datetime, reminder_offset, reminder_custom, notes, description, status, parent_id, recurrence_type, recurrence_rule, recurrence_end, recurrence_start) 
+                VALUES (:uid, :title, :category_id, :priority, :due_datetime, :reminder_offset, :reminder_custom, :notes, :description, :status, :parent_id, :recurrence_type, :recurrence_rule, :recurrence_end, :recurrence_start)
             ");
             $stmt->execute([
-                'uid'             => $currentUserId,
-                'title'           => $title,
-                'category_id'     => $catId,
-                'priority'        => $data['priority'] ?? 'medium',
-                'due_datetime'    => $data['due_datetime'] ?? null,
-                'reminder_offset' => intval($data['reminder_offset'] ?? 0),
-                'notes'           => trim($data['notes'] ?? ''),
-                'status'          => $data['status'] ?? 'todo',
+                'uid'              => $currentUserId,
+                'title'            => $title,
+                'category_id'      => $catId,
+                'priority'         => $data['priority'] ?? 'medium',
+                'due_datetime'     => $data['due_datetime'] ?? null,
+                'reminder_offset'  => intval($data['reminder_offset'] ?? 0),
+                'reminder_custom'  => $reminderCustom,
+                'notes'            => trim($data['notes'] ?? ''),
+                'description'      => trim($data['description'] ?? ''),
+                'status'           => $data['status'] ?? 'todo',
+                'parent_id'        => $parentId,
+                'recurrence_type'  => $recurType,
+                'recurrence_rule'  => $recurRule,
+                'recurrence_end'   => $recurEnd,
+                'recurrence_start' => $recurStart,
             ]);
 
             $newId = $db->lastInsertId();
@@ -692,11 +1109,33 @@ try {
 
             if ($taskId <= 0 || $title === '') jsonResponse(null, 400, '参数不完整');
 
+            $parentId = $data['parent_id'] ?? null;
+            if ($parentId !== null) $parentId = intval($parentId);
+            if ($parentId === 0) $parentId = null;
+
+            $reminderCustom = $data['reminder_custom'] ?? null;
+            if ($reminderCustom !== null && $reminderCustom !== '') {
+                if (!preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/', $reminderCustom)) {
+                    jsonResponse(null, 400, '自定义提醒时间格式无效');
+                }
+            }
+
+            // 重复任务字段
+            $recurType = trim($data['recurrence_type'] ?? '');
+            $recurType = in_array($recurType, ['daily','weekly','monthly','yearly'], true) ? $recurType : '';
+            $recurRule = $recurType ? (trim($data['recurrence_rule'] ?? '')) : '';
+            $recurEnd  = $recurType ? ($data['recurrence_end'] ?? null) : null;
+            if ($recurEnd !== null && $recurEnd === '') $recurEnd = null;
+            $recurStart = $recurType ? ($data['recurrence_start'] ?? null) : null;
+            if ($recurStart !== null && $recurStart === '') $recurStart = null;
+
             $stmt = $db->prepare("
                 UPDATE tasks 
                 SET title=:title, category_id=:category_id, priority=:priority, 
-                    due_datetime=:due_datetime, reminder_offset=:reminder_offset, notes=:notes,
-                    status=:status,
+                    due_datetime=:due_datetime, reminder_offset=:reminder_offset, 
+                    reminder_custom=:reminder_custom, notes=:notes, description=:description,
+                    status=:status, parent_id=:parent_id,
+                    recurrence_type=:recurrence_type, recurrence_rule=:recurrence_rule, recurrence_end=:recurrence_end, recurrence_start=:recurrence_start,
                     updated_at=datetime('now','localtime')
                 WHERE id=:id AND user_id=:uid
             ");
@@ -706,8 +1145,15 @@ try {
                 'priority'        => $data['priority'] ?? 'medium',
                 'due_datetime'    => $data['due_datetime'] ?? null,
                 'reminder_offset' => intval($data['reminder_offset'] ?? 0),
+                'reminder_custom' => $reminderCustom,
                 'notes'           => trim($data['notes'] ?? ''),
+                'description'     => trim($data['description'] ?? ''),
                 'status'          => $data['status'] ?? 'todo',
+                'parent_id'       => $parentId,
+                'recurrence_type' => $recurType,
+                'recurrence_rule' => $recurRule,
+                'recurrence_end'  => $recurEnd,
+                'recurrence_start'=> $recurStart,
                 'id'              => $taskId,
                 'uid'             => $currentUserId,
             ]);
@@ -729,16 +1175,80 @@ try {
             if ($taskId <= 0) jsonResponse(null, 400, '缺少任务ID');
 
             if ($isCompleted) {
+                // 先获取任务信息，判断是否有重复规则
+                $task = $db->query("SELECT * FROM tasks WHERE id = $taskId AND user_id = $currentUserId")->fetch();
+                if (!$task) jsonResponse(null, 404, '任务不存在');
+
                 $db->prepare("UPDATE tasks SET is_completed=1, completed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=:id AND user_id=:uid")
                    ->execute(['id' => $taskId, 'uid' => $currentUserId]);
                 writeLog("任务标记完成", ['id' => $taskId], $config);
+
+                // 重复任务：生成下一期实例
+                if (!empty($task['recurrence_type']) && !empty($task['due_datetime'])) {
+                    $nextDt = computeNextOccurrence($task['due_datetime'], $task['recurrence_type'], $task['recurrence_rule']);
+                    if ($nextDt) {
+                        $nextDue = $nextDt->format('Y-m-d H:i');
+                        // 检查是否超过截止日期
+                        $exceedEnd = false;
+                        if (!empty($task['recurrence_end'])) {
+                            $endDt = new DateTime($task['recurrence_end']);
+                            if ($nextDt > $endDt) $exceedEnd = true;
+                        }
+                        if (!$exceedEnd) {
+                            // 复制原任务生成新实例
+                            $newCount = intval($task['completion_count'] ?? 0) + 1;
+                            $stmt = $db->prepare("
+                                INSERT INTO tasks (user_id, title, category_id, priority, due_datetime, 
+                                    reminder_offset, reminder_custom, notes, description, status, 
+                                    recurrence_type, recurrence_rule, recurrence_end, recurrence_start, completion_count)
+                                VALUES (:uid, :title, :cat, :pri, :due, 
+                                    :rem, :remcus, :notes, :desc, 'todo',
+                                    :rtype, :rrule, :rend, :rstart, :cnt)
+                            ");
+                            $stmt->execute([
+                                'uid'    => $task['user_id'],
+                                'title'  => $task['title'],
+                                'cat'    => $task['category_id'],
+                                'pri'    => $task['priority'],
+                                'due'    => $nextDue,
+                                'rem'    => $task['reminder_offset'],
+                                'remcus' => $task['reminder_custom'],
+                                'notes'  => $task['notes'],
+                                'desc'   => $task['description'],
+                                'rtype'  => $task['recurrence_type'],
+                                'rrule'  => $task['recurrence_rule'],
+                                'rend'   => $task['recurrence_end'],
+                                'rstart' => $task['recurrence_start'] ?? null,
+                                'cnt'    => $newCount,
+                            ]);
+                            $newId = $db->lastInsertId();
+                            // 复制标签
+                            $tags = $db->query("SELECT tag_id FROM task_tags WHERE task_id = $taskId")->fetchAll(PDO::FETCH_COLUMN);
+                            if (!empty($tags)) {
+                                $insStmt = $db->prepare("INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (:tid, :tgid)");
+                                foreach ($tags as $tgid) {
+                                    $insStmt->execute(['tid' => $newId, 'tgid' => $tgid]);
+                                }
+                            }
+                            // 获取新任务完整数据返回
+                            $newTask = $db->query("
+                                SELECT t.*, c.name AS category_name, c.color AS category_color
+                                FROM tasks t LEFT JOIN categories c ON t.category_id = c.id
+                                WHERE t.id = $newId
+                            ")->fetch();
+                            $rows = [$newTask];
+                            attachTagsToTasks($rows, $db);
+                            jsonResponse($rows[0], 200, '任务已完成，下一期已生成');
+                        }
+                    }
+                }
+                jsonResponse(null, 200, '任务已完成');
             } else {
                 $db->prepare("UPDATE tasks SET is_completed=0, completed_at=NULL, updated_at=datetime('now','localtime') WHERE id=:id AND user_id=:uid")
                    ->execute(['id' => $taskId, 'uid' => $currentUserId]);
                 writeLog("任务取消完成", ['id' => $taskId], $config);
+                jsonResponse(null, 200, '任务已恢复');
             }
-
-            jsonResponse(null, 200, $isCompleted ? '任务已完成' : '任务已恢复');
 
         /**
          * v4.0 删除任务：软删除（移入垃圾桶）
@@ -877,7 +1387,7 @@ try {
                 FROM tasks t
                 LEFT JOIN categories c ON t.category_id = c.id
                 WHERE t.user_id = :uid AND t.is_deleted = 0 AND t.is_completed = 0
-                ORDER BY t.due_datetime ASC NULLS LAST
+                ORDER BY CASE WHEN t.due_datetime IS NULL THEN 1 ELSE 0 END, t.due_datetime ASC
             ");
             $stmt->execute(['uid' => $currentUserId]);
             $tasks = $stmt->fetchAll();
@@ -941,7 +1451,8 @@ try {
             $stmt = $db->prepare("
                 SELECT t.id, t.title, t.priority, t.is_completed, t.due_datetime,
                        date(t.due_datetime) AS due_date,
-                       c.color AS category_color, c.name AS category_name
+                       c.color AS category_color, c.name AS category_name,
+                       t.recurrence_type, t.recurrence_rule, t.recurrence_end, t.recurrence_start, t.created_at, t.completion_count
                 FROM tasks t
                 LEFT JOIN categories c ON t.category_id = c.id
                 WHERE t.user_id = :uid AND t.is_deleted = 0
@@ -951,6 +1462,29 @@ try {
             $stmt->execute(['uid' => $currentUserId, 'start' => $startDate, 'end' => $endDate]);
             $tasks = $stmt->fetchAll();
             attachTagsToTasks($tasks, $db);
+
+            // v2.2.1: 虚拟展开重复任务 —— 月历中显示所有未来重复实例
+            $recurStmt = $db->prepare("
+                SELECT t.id, t.title, t.priority, t.is_completed, t.due_datetime,
+                       c.color AS category_color, c.name AS category_name,
+                       t.recurrence_type, t.recurrence_rule, t.recurrence_end, t.recurrence_start, t.created_at, t.completion_count
+                FROM tasks t
+                LEFT JOIN categories c ON t.category_id = c.id
+                WHERE t.user_id = :uid AND t.is_deleted = 0 AND t.is_completed = 0
+                  AND t.recurrence_type != '' AND t.recurrence_type IS NOT NULL
+                  AND t.due_datetime IS NOT NULL
+                ORDER BY t.due_datetime ASC
+            ");
+            $recurStmt->execute(['uid' => $currentUserId]);
+            $allRecur = $recurStmt->fetchAll();
+
+            // 构建去重键：已有任务标题+日期不会重复生成
+            $seenKeys = [];
+            foreach ($tasks as $t) {
+                $seenKeys[($t['title'] ?? '') . '|' . ($t['due_date'] ?? '')] = true;
+            }
+            $virtuals = expandRecurringTasks($allRecur, $startDate, $endDate, $seenKeys);
+            $tasks = array_merge($tasks, $virtuals);
 
             // 按日期分组
             $calendar = [];
@@ -977,15 +1511,19 @@ try {
             requireAuth();
             $now = date('Y-m-d H:i');
             $stmt = $db->prepare("
-                SELECT t.id, t.title, t.priority, t.due_datetime, t.reminder_offset,
+                SELECT t.id, t.title, t.priority, t.due_datetime, t.reminder_offset, t.reminder_custom,
                        c.name AS category_name 
                 FROM tasks t 
                 LEFT JOIN categories c ON t.category_id = c.id 
                 WHERE t.user_id = :uid AND t.is_completed = 0 AND t.is_deleted = 0
-                  AND t.due_datetime IS NOT NULL
-                  AND datetime(t.due_datetime, '-' || t.reminder_offset || ' minutes') <= :now
-                  AND t.due_datetime >= datetime('now', 'localtime', '-30 minutes')
-                ORDER BY t.due_datetime ASC
+                  AND (
+                    (t.due_datetime IS NOT NULL AND datetime(t.due_datetime, '-' || t.reminder_offset || ' minutes') <= :now
+                     AND t.due_datetime >= datetime('now', 'localtime', '-30 minutes'))
+                    OR
+                    (t.reminder_custom IS NOT NULL AND t.reminder_custom <= :now
+                     AND t.reminder_custom >= datetime('now', 'localtime', '-30 minutes'))
+                  )
+                ORDER BY COALESCE(t.reminder_custom, t.due_datetime) ASC
             ");
             $stmt->execute(['uid' => $currentUserId, 'now' => $now]);
             $reminders = $stmt->fetchAll();
@@ -1112,6 +1650,346 @@ try {
                 'overdue'       => intval($overdue),
                 'pomo_count'    => intval($pomo['cnt']),
                 'pomo_minutes'  => intval($pomo['mins']),
+            ]);
+
+        // ==================== v6.0 附件管理 ====================
+
+        case 'upload_attachment':
+            requireAuth();
+            $taskId = intval($_POST['task_id'] ?? 0);
+            if ($taskId <= 0) jsonResponse(null, 400, '缺少任务ID');
+
+            // 验证任务归属
+            $task = $db->query("SELECT id FROM tasks WHERE id = $taskId AND user_id = $currentUserId")->fetch();
+            if (!$task) jsonResponse(null, 404, '任务不存在');
+
+            if (!isset($_FILES['file']) || $_FILES['file']['error'] !== UPLOAD_ERR_OK) {
+                jsonResponse(null, 400, '文件上传失败');
+            }
+
+            $file = $_FILES['file'];
+            $maxSize = 20 * 1024 * 1024; // 20MB
+            if ($file['size'] > $maxSize) {
+                jsonResponse(null, 400, '文件大小不能超过 20MB');
+            }
+
+            $uploadDir = __DIR__ . '/data/uploads/' . $currentUserId . '/';
+            if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
+
+            $origName = $file['name'];
+            $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
+            $safeName = $taskId . '_' . time() . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
+            $destPath = $uploadDir . $safeName;
+
+            if (!move_uploaded_file($file['tmp_name'], $destPath)) {
+                jsonResponse(null, 500, '文件保存失败');
+            }
+
+            $stmt = $db->prepare("
+                INSERT INTO task_attachments (user_id, task_id, filename, orig_name, file_size, file_type)
+                VALUES (:uid, :tid, :fn, :oname, :fs, :ft)
+            ");
+            $stmt->execute([
+                'uid'   => $currentUserId,
+                'tid'   => $taskId,
+                'fn'    => $safeName,
+                'oname' => $origName,
+                'fs'    => $file['size'],
+                'ft'    => $file['type'],
+            ]);
+            $attId = $db->lastInsertId();
+
+            writeLog("上传附件: {$origName}", ['task_id' => $taskId, 'attachment_id' => $attId], $config);
+            jsonResponse(['id' => $attId, 'orig_name' => $origName, 'file_size' => $file['size']], 201, '文件上传成功');
+
+        case 'list_attachments':
+            requireAuth();
+            $taskId = intval($_GET['task_id'] ?? 0);
+            if ($taskId <= 0) jsonResponse(null, 400, '缺少任务ID');
+
+            $stmt = $db->prepare("
+                SELECT * FROM task_attachments 
+                WHERE task_id = :tid AND user_id = :uid 
+                ORDER BY created_at DESC
+            ");
+            $stmt->execute(['tid' => $taskId, 'uid' => $currentUserId]);
+            jsonResponse($stmt->fetchAll());
+
+        case 'download_attachment':
+            $attId = intval($_GET['id'] ?? 0);
+            if ($attId <= 0) { http_response_code(400); exit('缺少附件ID'); }
+
+            $stmt = $db->prepare("SELECT * FROM task_attachments WHERE id = :id");
+            $stmt->execute(['id' => $attId]);
+            $att = $stmt->fetch();
+            if (!$att) { http_response_code(404); exit('附件不存在'); }
+
+            $filePath = __DIR__ . '/data/uploads/' . $att['user_id'] . '/' . $att['filename'];
+            if (!file_exists($filePath)) { http_response_code(404); exit('文件不存在'); }
+
+            // PDF 在线预览（inline）vs 其他下载（attachment）
+            $disposition = (stripos($att['file_type'], 'pdf') !== false || stripos($att['orig_name'], '.pdf') !== false) ? 'inline' : 'attachment';
+
+            header('Content-Type: ' . ($att['file_type'] ?: 'application/octet-stream'));
+            header('Content-Disposition: ' . $disposition . '; filename="' . rawurlencode($att['orig_name']) . '"');
+            header('Content-Length: ' . $att['file_size']);
+            header('Cache-Control: private, max-age=3600');
+            readfile($filePath);
+            exit;
+
+        case 'delete_attachment':
+            requireAuth();
+            $data  = getJsonInput();
+            $attId = intval($data['id'] ?? 0);
+            if ($attId <= 0) jsonResponse(null, 400, '缺少附件ID');
+
+            $stmt = $db->prepare("SELECT * FROM task_attachments WHERE id = :id AND user_id = :uid");
+            $stmt->execute(['id' => $attId, 'uid' => $currentUserId]);
+            $att = $stmt->fetch();
+            if (!$att) jsonResponse(null, 404, '附件不存在');
+
+            $filePath = __DIR__ . '/data/uploads/' . $att['user_id'] . '/' . $att['filename'];
+            if (file_exists($filePath)) @unlink($filePath);
+
+            $db->prepare("DELETE FROM task_attachments WHERE id = :id")->execute(['id' => $attId]);
+            writeLog("删除附件: " . $att['orig_name'], ['id' => $attId], $config);
+            jsonResponse(null, 200, '附件已删除');
+
+        // ==================== v6.0 子任务 ====================
+
+        case 'list_subtasks':
+            requireAuth();
+            $parentId = intval($_GET['parent_id'] ?? 0);
+            if ($parentId <= 0) jsonResponse(null, 400, '缺少父任务ID');
+
+            $stmt = $db->prepare("
+                SELECT t.*, c.name AS category_name, c.color AS category_color
+                FROM tasks t 
+                LEFT JOIN categories c ON t.category_id = c.id 
+                WHERE t.parent_id = :pid AND t.user_id = :uid AND t.is_deleted = 0
+                ORDER BY CASE WHEN t.due_datetime IS NULL THEN 1 ELSE 0 END, t.due_datetime ASC, t.created_at ASC
+            ");
+            $stmt->execute(['pid' => $parentId, 'uid' => $currentUserId]);
+            $subtasks = $stmt->fetchAll();
+            attachTagsToTasks($subtasks, $db);
+            jsonResponse($subtasks);
+
+        // ==================== v6.0 打卡模块 ====================
+
+        case 'list_habits':
+            requireAuth();
+            $stmt = $db->prepare("
+                SELECT * FROM habits 
+                WHERE user_id = :uid AND is_archived = 0
+                ORDER BY sort_order ASC, id ASC
+            ");
+            $stmt->execute(['uid' => $currentUserId]);
+            $habits = $stmt->fetchAll();
+
+            $today = date('Y-m-d');
+            foreach ($habits as &$h) {
+                $h['checked_today'] = $db->query("
+                    SELECT COUNT(*) FROM habit_logs 
+                    WHERE habit_id = {$h['id']} AND check_date = '$today'
+                ")->fetchColumn() > 0;
+            }
+            jsonResponse($habits);
+
+        case 'create_habit':
+            requireAuth();
+            $data = getJsonInput();
+            $name = trim($data['name'] ?? '');
+            if ($name === '') jsonResponse(null, 400, '习惯名称不能为空');
+
+            $stmt = $db->prepare("
+                INSERT INTO habits (user_id, name, icon, color, target_days, sort_order)
+                VALUES (:uid, :name, :icon, :color, :td, :so)
+            ");
+            $stmt->execute([
+                'uid'   => $currentUserId,
+                'name'  => $name,
+                'icon'  => $data['icon'] ?? '📌',
+                'color' => $data['color'] ?? '#4A90D9',
+                'td'    => $data['target_days'] ?? '1,2,3,4,5,6,7',
+                'so'    => $data['sort_order'] ?? 0,
+            ]);
+            $newId = $db->lastInsertId();
+            writeLog("创建打卡习惯: {$name}", ['id' => $newId], $config);
+            jsonResponse(['id' => $newId, 'name' => $name], 201, '习惯创建成功');
+
+        case 'update_habit':
+            requireAuth();
+            $data = getJsonInput();
+            $id   = intval($data['id'] ?? 0);
+            $name = trim($data['name'] ?? '');
+            if ($id <= 0 || $name === '') jsonResponse(null, 400, '参数不完整');
+
+            $stmt = $db->prepare("
+                UPDATE habits SET name=:name, icon=:icon, color=:color, target_days=:td
+                WHERE id=:id AND user_id=:uid
+            ");
+            $stmt->execute([
+                'id'   => $id,
+                'uid'  => $currentUserId,
+                'name' => $name,
+                'icon' => $data['icon'] ?? '📌',
+                'color'=> $data['color'] ?? '#4A90D9',
+                'td'   => $data['target_days'] ?? '1,2,3,4,5,6,7',
+            ]);
+            jsonResponse(null, 200, '习惯已更新');
+
+        case 'delete_habit':
+            requireAuth();
+            $data = getJsonInput();
+            $id   = intval($data['id'] ?? 0);
+            if ($id <= 0) jsonResponse(null, 400, '缺少习惯ID');
+
+            $db->prepare("DELETE FROM habit_logs WHERE habit_id = :id")->execute(['id' => $id]);
+            $db->prepare("DELETE FROM habits WHERE id = :id AND user_id = :uid")->execute(['id' => $id, 'uid' => $currentUserId]);
+            writeLog("删除打卡习惯", ['id' => $id], $config);
+            jsonResponse(null, 200, '习惯已删除');
+
+        case 'toggle_habit':
+            requireAuth();
+            $data     = getJsonInput();
+            $habitId  = intval($data['id'] ?? 0);
+            $date     = $data['date'] ?? date('Y-m-d');
+            if ($habitId <= 0) jsonResponse(null, 400, '缺少习惯ID');
+
+            $existing = $db->query("
+                SELECT id FROM habit_logs 
+                WHERE habit_id = $habitId AND check_date = '$date'
+            ")->fetch();
+
+            if ($existing) {
+                $db->prepare("DELETE FROM habit_logs WHERE id = :id")->execute(['id' => $existing['id']]);
+                jsonResponse(['checked' => false], 200, '已取消打卡');
+            } else {
+                $stmt = $db->prepare("
+                    INSERT INTO habit_logs (habit_id, user_id, check_date, note)
+                    VALUES (:hid, :uid, :date, :note)
+                ");
+                $stmt->execute([
+                    'hid'  => $habitId,
+                    'uid'  => $currentUserId,
+                    'date' => $date,
+                    'note' => $data['note'] ?? '',
+                ]);
+                jsonResponse(['checked' => true], 200, '打卡成功！');
+            }
+
+        case 'habit_stats':
+            requireAuth();
+            $habitId = intval($_GET['habit_id'] ?? 0);
+            if ($habitId <= 0) jsonResponse(null, 400, '缺少习惯ID');
+
+            $allLogs = $db->query("
+                SELECT check_date FROM habit_logs 
+                WHERE habit_id = $habitId 
+                ORDER BY check_date DESC
+            ")->fetchAll(PDO::FETCH_COLUMN);
+
+            $totalChecks = count($allLogs);
+            $today = date('Y-m-d');
+
+            // 计算连续打卡天数
+            $streak = 0;
+            $checkSet = array_flip($allLogs);
+            $d = new DateTime($today);
+            if (!isset($checkSet[$today])) {
+                $d->modify('-1 day');
+            }
+            while (isset($checkSet[$d->format('Y-m-d')])) {
+                $streak++;
+                $d->modify('-1 day');
+            }
+
+            // 本周完成率
+            $weekStart = date('Y-m-d', strtotime('monday this week'));
+            $weekChecks = $db->query("
+                SELECT COUNT(*) FROM habit_logs 
+                WHERE habit_id = $habitId AND check_date >= '$weekStart'
+            ")->fetchColumn();
+
+            // 本月完成率
+            $monthStart = date('Y-m-01');
+            $monthChecks = $db->query("
+                SELECT COUNT(*) FROM habit_logs 
+                WHERE habit_id = $habitId AND check_date >= '$monthStart'
+            ")->fetchColumn();
+
+            // 近30天数据
+            $days30ago = date('Y-m-d', strtotime('-29 days'));
+            $recentLogs = $db->query("
+                SELECT check_date FROM habit_logs 
+                WHERE habit_id = $habitId AND check_date >= '$days30ago'
+                ORDER BY check_date ASC
+            ")->fetchAll(PDO::FETCH_COLUMN);
+
+            $dailyMap = [];
+            $dayNames = ['日', '一', '二', '三', '四', '五', '六'];
+            for ($i = 29; $i >= 0; $i--) {
+                $dt = date('Y-m-d', strtotime("-{$i} days"));
+                $dailyMap[] = [
+                    'date'  => $dt,
+                    'day'   => $dayNames[date('w', strtotime($dt))],
+                    'checked' => in_array($dt, $recentLogs),
+                ];
+            }
+
+            // 日期的周数（本周 7 天）
+            $daysInWeek = (new DateTime())->format('N'); // 1=Mon...7=Sun
+
+            jsonResponse([
+                'total_checks'  => $totalChecks,
+                'streak'        => $streak,
+                'week_checks'   => intval($weekChecks),
+                'week_total'    => intval($daysInWeek),
+                'week_rate'     => $daysInWeek > 0 ? round($weekChecks / $daysInWeek * 100) : 0,
+                'month_checks'  => intval($monthChecks),
+                'month_total'   => intval(date('d')),
+                'month_rate'    => date('d') > 0 ? round($monthChecks / intval(date('d')) * 100) : 0,
+                'daily_30'      => $dailyMap,
+            ]);
+
+        case 'all_habits_stats':
+            requireAuth();
+            $today = date('Y-m-d');
+            $stmt = $db->prepare("
+                SELECT COUNT(DISTINCT hl.habit_id) as today_count
+                FROM habit_logs hl
+                JOIN habits h ON hl.habit_id = h.id
+                WHERE h.user_id = :uid AND hl.check_date = :today
+            ");
+            $stmt->execute(['uid' => $currentUserId, 'today' => $today]);
+            $todayCount = intval($stmt->fetch()['today_count'] ?? 0);
+
+            $totalHabits = $db->query("
+                SELECT COUNT(*) FROM habits WHERE user_id = $currentUserId AND is_archived = 0
+            ")->fetchColumn();
+
+            // 近7天趋势
+            $trend = [];
+            for ($i = 6; $i >= 0; $i--) {
+                $d = date('Y-m-d', strtotime("-{$i} days"));
+                $cnt = $db->query("
+                    SELECT COUNT(DISTINCT hl.habit_id)
+                    FROM habit_logs hl
+                    JOIN habits h ON hl.habit_id = h.id
+                    WHERE h.user_id = $currentUserId AND hl.check_date = '$d'
+                ")->fetchColumn();
+                $weekdays = ['日', '一', '二', '三', '四', '五', '六'];
+                $trend[] = [
+                    'date'  => $d,
+                    'day'   => $weekdays[date('w', strtotime($d))],
+                    'count' => intval($cnt),
+                ];
+            }
+
+            jsonResponse([
+                'today_count'  => $todayCount,
+                'total_habits' => intval($totalHabits),
+                'trend'        => $trend,
             ]);
 
         // 未知 action
