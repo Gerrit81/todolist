@@ -1,11 +1,11 @@
 <?php
 /**
- * 任务管理系统 v2.2.7 — 效率办公中心
+ * 任务管理系统 v2.4.1 — 效率办公中心
  *
  * 功能：任务管理 / 番茄钟 / 多皮肤主题 / 任务工作流(待办→处理→完成) / 每日回顾 / 子任务 / 附件 / 打卡
  *
  * 文件结构：
- *   css/style.css — 全局样式 + 6套皮肤
+ *   css/style.css — 全局样式 + 10套皮肤
  *   js/app.js    — 前端应用逻辑
  *   config.php   — 数据库 / 认证 / 工具函数
  *   api.php      — REST API
@@ -18,26 +18,38 @@ require_once __DIR__ . '/config.php';
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>任务管理系统</title>
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/style.css?v=<?php echo $config['app_version']; ?>">
 </head>
 <body data-theme="default">
 
 <!-- ========== 认证页面 ========== -->
-<div id="authPage" class="auth-page">
+<div id="authPage" class="auth-page hidden">
+    <!-- 毛玻璃背景装饰 -->
+    <div class="auth-bg">
+        <div class="auth-bg-circle auth-bg-c1"></div>
+        <div class="auth-bg-circle auth-bg-c2"></div>
+        <div class="auth-bg-circle auth-bg-c3"></div>
+    </div>
     <div class="auth-card">
+        <div class="auth-logo">📋</div>
         <h2 id="authTitle">任务管理系统</h2>
         <p class="auth-sub">效率办公 · 即刻开始</p>
         <div class="form-group" id="emailGroup" style="display:none">
             <label>邮箱（选填，用于邮件提醒）</label>
-            <input type="email" id="regEmail" placeholder="your@email.com">
+            <input type="email" id="regEmail" placeholder="your@email.com" class="auth-input">
         </div>
         <div class="form-group">
             <label>用户名</label>
-            <input type="text" id="authUsername" placeholder="请输入用户名" onkeydown="if(event.key==='Enter')submitAuth()">
+            <input type="text" id="authUsername" placeholder="请输入用户名" class="auth-input" onkeydown="if(event.key==='Enter')submitAuth()">
         </div>
         <div class="form-group">
             <label>密码</label>
-            <input type="password" id="authPassword" placeholder="请输入密码" onkeydown="if(event.key==='Enter')submitAuth()">
+            <input type="password" id="authPassword" placeholder="请输入密码" class="auth-input" onkeydown="if(event.key==='Enter')submitAuth()">
+        </div>
+        <div class="form-group" id="rememberGroup">
+            <label class="remember-label">
+                <input type="checkbox" id="rememberMe"> 保持登录
+            </label>
         </div>
         <input type="hidden" id="authMode" value="login">
         <button class="auth-btn" id="authBtn" onclick="submitAuth()">登 录</button>
@@ -61,16 +73,10 @@ require_once __DIR__ . '/config.php';
                 </div>
             </div>
             <div class="header-right">
-                <div class="theme-switcher">
-                    <span class="theme-dot t-default active" data-theme="default" onclick="switchTheme('default')" title="默认"></span>
-                    <span class="theme-dot t-green" data-theme="green" onclick="switchTheme('green')" title="护眼绿"></span>
-                    <span class="theme-dot t-pink" data-theme="pink" onclick="switchTheme('pink')" title="樱花粉"></span>
-                    <span class="theme-dot t-dark" data-theme="dark" onclick="switchTheme('dark')" title="暗夜模式"></span>
-                    <span class="theme-dot t-ocean" data-theme="ocean" onclick="switchTheme('ocean')" title="海洋蓝"></span>
-                    <span class="theme-dot t-sunset" data-theme="sunset" onclick="switchTheme('sunset')" title="日落橙"></span>
-                </div>
+                <button class="theme-btn" id="themeBtn" onclick="showThemePicker()" title="切换配色">🎨</button>
                 <span class="header-user" id="headerUsername" onclick="showPasswordDialog()" title="修改密码"></span>
                 <button class="header-btn" onclick="showSettings()">⚙️</button>
+                <a href="admin.php" id="adminLink" class="header-btn" style="display:none;text-decoration:none;" title="后台管理">🔐</a>
                 <button class="header-btn" onclick="logout()">退出</button>
                 <span class="header-version">v<?php echo htmlspecialchars($config['app_version']); ?></span>
             </div>
@@ -240,21 +246,7 @@ require_once __DIR__ . '/config.php';
         </main>
     </div>
 
-    <!-- 页脚 -->
-    <footer class="footer">
-        <div class="footer-inner">
-            <div class="footer-left">
-                <span class="footer-logo">任务管理系统</span>
-                <span class="footer-version">v<?php echo htmlspecialchars($config['app_version']); ?></span>
-            </div>
-            <div class="footer-center">
-                <span>高效 · 专注 · 简洁</span>
-            </div>
-            <div class="footer-right">
-                <span>© <?php echo date('Y'); ?> TodoList</span>
-            </div>
-        </div>
-    </footer>
+<?php include '_foot.php'; ?>
 </div>
 
 <!-- ========== 弹窗 ========== -->
@@ -303,6 +295,9 @@ require_once __DIR__ . '/config.php';
             <div class="edit-field"><label>优先级</label><select id="createTaskPriority"><option value="high">🔴 高</option><option value="medium" selected>🟡 中</option><option value="low">🟢 低</option></select></div>
         </div>
         <div class="edit-row">
+            <div class="edit-field"><label>开始日期</label><input type="date" id="createStartDate"></div>
+        </div>
+        <div class="edit-row">
             <div class="edit-field"><label>截止日期</label><input type="date" id="createTaskDate" value="<?php echo date('Y-m-d'); ?>"></div>
             <div class="edit-field"><label>截止时间</label><input type="time" id="createTaskTime" value="09:00"></div>
         </div>
@@ -322,9 +317,6 @@ require_once __DIR__ . '/config.php';
                     <option value="yearly">每年</option>
                 </select></div>
                 <div class="edit-field hidden" id="createRecurrenceEndField"><label>重复截止</label><input type="date" id="createRecurrenceEnd"></div>
-            </div>
-            <div class="edit-row hidden" id="createRecurrenceStartField">
-                <div class="edit-field"><label>开始日期</label><input type="date" id="createRecurrenceStart"></div>
             </div>
             <div class="edit-row hidden" id="createWeeklyDays">
                 <div class="edit-field"><label>每周几</label>
@@ -381,6 +373,9 @@ require_once __DIR__ . '/config.php';
         </div>
         <div class="edit-row"><div class="edit-field"><label>优先级</label><select id="editTaskPriority"><option value="high">🔴 高</option><option value="medium">🟡 中</option><option value="low">🟢 低</option></select></div></div>
         <div class="edit-row">
+            <div class="edit-field"><label>开始日期</label><input type="date" id="editStartDate"></div>
+        </div>
+        <div class="edit-row">
             <div class="edit-field"><label>截止日期</label><input type="date" id="editTaskDate"></div>
             <div class="edit-field"><label>截止时间</label><input type="time" id="editTaskTime"></div>
         </div>
@@ -400,9 +395,6 @@ require_once __DIR__ . '/config.php';
                     <option value="yearly">每年</option>
                 </select></div>
                 <div class="edit-field hidden" id="editRecurrenceEndField"><label>重复截止</label><input type="date" id="editRecurrenceEnd"></div>
-            </div>
-            <div class="edit-row hidden" id="editRecurrenceStartField">
-                <div class="edit-field"><label>开始日期</label><input type="date" id="editRecurrenceStart"></div>
             </div>
             <div class="edit-row hidden" id="editWeeklyDays">
                 <div class="edit-field"><label>每周几</label>
@@ -459,6 +451,15 @@ require_once __DIR__ . '/config.php';
         <div class="edit-field"><label>新密码</label><input type="password" id="newPassword" placeholder="新密码（至少6位）"></div>
         <div class="edit-field"><label>确认新密码</label><input type="password" id="confirmPassword" placeholder="再次输入"></div>
         <div class="modal-actions"><button class="btn-cancel" onclick="closePasswordDialog()">取消</button><button class="btn-save" onclick="changePassword()">修改</button></div>
+    </div>
+</div>
+
+<!-- 主题选择弹窗 -->
+<div id="themePicker" class="modal-overlay" onclick="if(event.target===this)closeThemePicker()">
+    <div class="modal-box theme-picker-box">
+        <h3>🎨 选择配色主题</h3><span class="modal-close" onclick="closeThemePicker()">✕</span>
+        <div class="theme-grid" id="themeGrid">
+        </div>
     </div>
 </div>
 
@@ -533,6 +534,8 @@ require_once __DIR__ . '/config.php';
     </div>
 </div>
 
-<script src="js/app.js"></script>
+<div class="reminder-popup-container" id="reminderPopupContainer"></div>
+
+<script src="js/app.js?v=<?php echo $config['app_version']; ?>"></script>
 </body>
 </html>

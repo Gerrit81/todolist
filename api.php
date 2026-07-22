@@ -13,7 +13,7 @@
  *   - 新增搜索接口（任务标题/备注/标签）
  *   - 列表任务按「已过期 / 今天 / 明天 / 未来 / 无日期」分组
  *
- * @version  2.2.7
+ * @version  2.4.1
  * @date     2026-07-18
  * =============================================================================
  */
@@ -72,21 +72,39 @@ function computeNextOccurrence($dueDatetime, $recurType, $recurRule) {
                 }
                 break;
 
-            case 'monthly':
-                $day = max(1, min(31, intval($rule['day'] ?? 1)));
-                // 先跳到下个月
+        case 'monthly':
+            $day = max(1, min(31, intval($rule['day'] ?? 1)));
+            $currentDay = (int)$dt->format('j');
+            if ($day > $currentDay) {
+                // 本月目标日还在未来 → 留在本月
+                $lastDay = (int)$dt->format('t');
+                $dt->setDate($dt->format('Y'), $dt->format('m'), min($day, $lastDay));
+            } else {
+                // 本月目标日已过 → 跳到下个月
                 $dt->modify('first day of next month');
                 $lastDay = (int)$dt->format('t');
                 $dt->setDate($dt->format('Y'), $dt->format('m'), min($day, $lastDay));
-                break;
+            }
+            break;
 
-            case 'yearly':
-                $month = max(1, min(12, intval($rule['month'] ?? 1)));
-                $day   = max(1, min(31, intval($rule['day'] ?? 1)));
-                $dt->modify('+1 year');
-                $lastDay = (int)$dt->setDate($dt->format('Y'), $month, 1)->format('t');
-                $dt->setDate($dt->format('Y'), $month, min($day, $lastDay));
-                break;
+        case 'yearly':
+            $month = max(1, min(12, intval($rule['month'] ?? 1)));
+            $day   = max(1, min(31, intval($rule['day'] ?? 1)));
+            $currentMonth = (int)$dt->format('m');
+            $currentDay   = (int)$dt->format('j');
+            $currentYear  = (int)$dt->format('Y');
+            if ($month > $currentMonth || ($month == $currentMonth && $day > $currentDay)) {
+                // 今年目标日还在未来 → 留在今年
+                $dt->setDate($currentYear, $month, 1);
+                $lastDay = (int)$dt->format('t');
+                $dt->setDate($currentYear, $month, min($day, $lastDay));
+            } else {
+                // 今年目标日已过 → 跳到下一年
+                $dt->setDate($currentYear + 1, $month, 1);
+                $lastDay = (int)$dt->format('t');
+                $dt->setDate($currentYear + 1, $month, min($day, $lastDay));
+            }
+            break;
 
             default:
                 return null;
@@ -145,20 +163,39 @@ function computePrevOccurrence($dueDatetime, $recurType, $recurRule) {
                 }
                 break;
 
-            case 'monthly':
-                $day = max(1, min(31, intval($rule['day'] ?? 1)));
+        case 'monthly':
+            $day = max(1, min(31, intval($rule['day'] ?? 1)));
+            $currentDay = (int)$dt->format('j');
+            if ($day < $currentDay) {
+                // 本月目标日已过 → 上一次就是本月
+                $lastDay = (int)$dt->format('t');
+                $dt->setDate($dt->format('Y'), $dt->format('m'), min($day, $lastDay));
+            } else {
+                // 本月目标日还未到 → 上一次是上个月
                 $dt->modify('last day of previous month');
                 $lastDay = (int)$dt->format('t');
                 $dt->setDate($dt->format('Y'), $dt->format('m'), min($day, $lastDay));
-                break;
+            }
+            break;
 
-            case 'yearly':
-                $month = max(1, min(12, intval($rule['month'] ?? 1)));
-                $day   = max(1, min(31, intval($rule['day'] ?? 1)));
-                $dt->modify('-1 year');
-                $lastDay = (int)$dt->setDate($dt->format('Y'), $month, 1)->format('t');
-                $dt->setDate($dt->format('Y'), $month, min($day, $lastDay));
-                break;
+        case 'yearly':
+            $month = max(1, min(12, intval($rule['month'] ?? 1)));
+            $day   = max(1, min(31, intval($rule['day'] ?? 1)));
+            $currentMonth = (int)$dt->format('m');
+            $currentDay   = (int)$dt->format('j');
+            $currentYear  = (int)$dt->format('Y');
+            if ($month < $currentMonth || ($month == $currentMonth && $day < $currentDay)) {
+                // 今年目标日已过 → 上一次就是今年
+                $dt->setDate($currentYear, $month, 1);
+                $lastDay = (int)$dt->format('t');
+                $dt->setDate($currentYear, $month, min($day, $lastDay));
+            } else {
+                // 今年目标日还未到 → 上一次是去年
+                $dt->setDate($currentYear - 1, $month, 1);
+                $lastDay = (int)$dt->format('t');
+                $dt->setDate($currentYear - 1, $month, min($day, $lastDay));
+            }
+            break;
 
             default:
                 return null;
@@ -221,6 +258,13 @@ function expandRecurringTasks($tasks, $rangeStart, $rangeEnd, &$seenKeys = []) {
             continue; // 日期格式异常，跳过该任务
         }
 
+        // v2.3.1: 用 recurrence_start 作为展开锚点，保证第一个命中日不会因
+        // due_datetime 正好落在匹配日而被跳过（例如：开始日期 7/18、每周一，
+        // 若 due_datetime=7/20(周一) 则 computeNextOccurrence 会跳到 7/27）
+        if ($recurStart && $recurStart < $current) {
+            $current = clone $recurStart;
+        }
+
         // 如果 due_datetime 超出视图范围（在未来），逆向回退找到范围附近的锚点
         if ($current >= $re) {
             $backIter = 0;
@@ -267,7 +311,6 @@ function expandRecurringTasks($tasks, $rangeStart, $rangeEnd, &$seenKeys = []) {
                     $vt['due_date']      = $next->format('Y-m-d');
                     $vt['_virtual']      = 1;
                     $vt['is_completed']  = 0; // 虚拟实例始终未完成
-                    $vt['id']            = null;
                     $virtuals[]          = $vt;
                 }
             }
@@ -281,6 +324,9 @@ function expandRecurringTasks($tasks, $rangeStart, $rangeEnd, &$seenKeys = []) {
 
     return $virtuals;
 }
+
+// ---- 每日自动备份（惰性触发，同一天仅执行一次） ----
+autoBackupDaily($config);
 
 $action = $_GET['action'] ?? '';
 $method = $_SERVER['REQUEST_METHOD'];
@@ -396,9 +442,10 @@ try {
             jsonResponse(['user_id' => $userId, 'username' => $username], 201, '注册成功');
 
         case 'login':
-            $data     = getJsonInput();
-            $username = trim($data['username'] ?? '');
-            $password = $data['password'] ?? '';
+            $data       = getJsonInput();
+            $username   = trim($data['username'] ?? '');
+            $password   = $data['password'] ?? '';
+            $rememberMe = !empty($data['remember_me']);
 
             if (empty($username) || empty($password)) {
                 jsonResponse(null, 400, '请输入用户名和密码');
@@ -411,10 +458,21 @@ try {
             if (!$user) jsonResponse(null, 401, '用户名或密码错误');
             if (!password_verify($password, $user['password'])) jsonResponse(null, 401, '用户名或密码错误');
 
-            $_SESSION['user_id']  = $user['id'];
-            $_SESSION['username'] = $user['username'];
+            // 安全：登录成功后重新生成 Session ID，防止 Session 固定攻击
+            session_regenerate_id(true);
 
-            writeLog("用户登录: {$username}", ['user_id' => $user['id']], $config);
+            $_SESSION['user_id']       = $user['id'];
+            $_SESSION['username']      = $user['username'];
+            $_SESSION['persist_login'] = $rememberMe;  // 标记是否「保持登录」
+
+            // 「保持登录」：设置持久化 Cookie（30 天有效）
+            if ($rememberMe) {
+                $lifetime = 30 * 24 * 3600;
+                setcookie(session_name(), session_id(), time() + $lifetime, '/', '', false, true);
+            }
+
+            recordLoginHistory($db, $user['id']);
+            writeLog("用户登录: {$username}" . ($rememberMe ? ' [保持登录]' : ''), ['user_id' => $user['id']], $config);
             jsonResponse(['user_id' => $user['id'], 'username' => $user['username']], 200, '登录成功');
 
         case 'logout':
@@ -456,7 +514,10 @@ try {
 
         case 'check_auth':
             if ($currentUserId > 0) {
-                jsonResponse(['user_id' => $currentUserId, 'username' => getCurrentUsername()]);
+                $stmt = $db->prepare("SELECT role FROM users WHERE id = ?");
+                $stmt->execute([$currentUserId]);
+                $role = $stmt->fetchColumn() ?: 'user';
+                jsonResponse(['user_id' => $currentUserId, 'username' => getCurrentUsername(), 'role' => $role]);
             } else {
                 jsonResponse(null, 401, '未登录');
             }
@@ -625,14 +686,14 @@ try {
                 WHERE t.user_id = :uid AND t.is_completed = 0 AND t.is_deleted = 0
                   AND (
                     (t.due_datetime IS NOT NULL AND datetime(t.due_datetime, '-' || t.reminder_offset || ' minutes') <= :now
-                     AND t.due_datetime >= date('now', 'localtime'))
+                     AND t.due_datetime >= :today_rem)
                     OR
                     (t.reminder_custom IS NOT NULL AND t.reminder_custom <= :now
-                     AND t.reminder_custom >= date('now', 'localtime'))
+                     AND t.reminder_custom >= :today_rem)
                   )
                 ORDER BY COALESCE(t.reminder_custom, t.due_datetime) ASC
             ");
-            $stmt->execute(['uid' => $currentUserId, 'now' => $now]);
+            $stmt->execute(['uid' => $currentUserId, 'now' => $now, 'today_rem' => date('Y-m-d')]);
             $reminders = $stmt->fetchAll();
 
             if (empty($reminders)) {
@@ -818,7 +879,9 @@ try {
                 $params['cal_start'] = $calendar_date;
                 $params['cal_end']   = $nextDay;
             } elseif ($filter === 'today') {
-                $sql .= " AND t.is_completed = 0 AND date(t.due_datetime) <= date('now', 'localtime')";
+                $today_php = date('Y-m-d');
+                $sql .= " AND t.is_completed = 0 AND date(t.due_datetime) <= :today_php";
+                $params['today_php'] = $today_php;
             } elseif ($filter === 'tomorrow') {
                 $tomorrow = date('Y-m-d', strtotime('+1 day'));
                 $sql .= " AND t.is_completed = 0 AND date(t.due_datetime) = :tomorrow";
@@ -830,7 +893,9 @@ try {
                 $params['d1'] = $today;
                 $params['d2'] = $day7;
             } elseif ($filter === 'upcoming') {
-                $sql .= " AND t.is_completed = 0 AND date(t.due_datetime) >= date('now', 'localtime', '+1 day')";
+                $tomorrow_php = date('Y-m-d', strtotime('+1 day'));
+                $sql .= " AND t.is_completed = 0 AND date(t.due_datetime) >= :tomorrow_php";
+                $params['tomorrow_php'] = $tomorrow_php;
             } elseif ($filter === 'all') {
                 $sql .= " AND t.is_completed = 0";
             } elseif ($filter === 'completed') {
@@ -1433,6 +1498,63 @@ try {
             $stats['completed'] = $db->query("SELECT COUNT(*) FROM tasks WHERE user_id = $currentUserId AND is_deleted = 0 AND is_completed = 1")->fetchColumn();
             $stats['trash'] = $db->query("SELECT COUNT(*) FROM tasks WHERE user_id = $currentUserId AND is_deleted = 1")->fetchColumn();
             $stats['no_due'] = $db->query("SELECT COUNT(*) FROM tasks WHERE user_id = $currentUserId AND is_deleted = 0 AND is_completed = 0 AND due_datetime IS NULL")->fetchColumn();
+
+            // v2.3.3: 循环任务的虚拟实例补充计数
+            // 基础查询只统计了 real tasks 的 due_datetime；循环任务完成推进后
+            // due_datetime 已移到未来，但仍会在今天/7天内产生虚拟实例，需补入
+            $recurStmt = $db->query("SELECT t.*, c.name AS category_name, c.color AS category_color
+                FROM tasks t LEFT JOIN categories c ON t.category_id = c.id
+                WHERE t.user_id = $currentUserId AND t.is_deleted = 0 AND t.is_completed = 0
+                AND t.recurrence_type IS NOT NULL AND t.recurrence_type != ''");
+            $recurringTasks = $recurStmt->fetchAll();
+
+            if (!empty($recurringTasks)) {
+                $origDueMap = [];
+                foreach ($recurringTasks as $rt) {
+                    $origDueMap[$rt['id']] = substr($rt['due_datetime'] ?? '', 0, 10);
+                }
+
+                // Today: 展开当天虚拟实例
+                $todayEnd = date('Y-m-d', strtotime('+1 day'));
+                $seens = [];
+                $todayVirts = expandRecurringTasks($recurringTasks, $today, $todayEnd, $seens);
+                $todayExtra = 0;
+                $seenIds = [];
+                foreach ($todayVirts as $v) {
+                    $vd = substr($v['due_datetime'], 0, 10);
+                    if ($vd >= $today && $vd < $todayEnd) {
+                        $oid = $v['id'];
+                        $origDue = $origDueMap[$oid] ?? '';
+                        // 原任务 due_date 不在今天/之前 → 基础查询没计入，补 +1
+                        if ((!$origDue || $origDue > $today) && !isset($seenIds[$oid])) {
+                            $seenIds[$oid] = true;
+                            $todayExtra++;
+                        }
+                    }
+                }
+                $stats['today'] += $todayExtra;
+
+                // Next7days: 展开 7 天虚拟实例
+                $weekEnd = date('Y-m-d', strtotime('+8 days'));
+                $seens7 = [];
+                $weekVirts = expandRecurringTasks($recurringTasks, $today, $weekEnd, $seens7);
+                $weekExtra = 0;
+                $seenIds7 = [];
+                foreach ($weekVirts as $v) {
+                    $vd = substr($v['due_datetime'], 0, 10);
+                    if ($vd >= $today && $vd <= $weekLater) {
+                        $oid = $v['id'];
+                        $origDue = $origDueMap[$oid] ?? '';
+                        // 原任务 due_date 不在 7 日范围内 → 基础查询没计入，补 +1
+                        if ((!$origDue || $origDue < $today || $origDue > $weekLater) && !isset($seenIds7[$oid])) {
+                            $seenIds7[$oid] = true;
+                            $weekExtra++;
+                        }
+                    }
+                }
+                $stats['next7days'] += $weekExtra;
+            }
+
             jsonResponse($stats);
 
 
@@ -1510,6 +1632,7 @@ try {
         case 'today_reminders':
             requireAuth();
             $now = date('Y-m-d H:i');
+            $min30 = date('Y-m-d H:i', strtotime('-30 minutes'));
             $stmt = $db->prepare("
                 SELECT t.id, t.title, t.priority, t.due_datetime, t.reminder_offset, t.reminder_custom,
                        c.name AS category_name 
@@ -1517,17 +1640,53 @@ try {
                 LEFT JOIN categories c ON t.category_id = c.id 
                 WHERE t.user_id = :uid AND t.is_completed = 0 AND t.is_deleted = 0
                   AND (
-                    (t.due_datetime IS NOT NULL AND datetime(t.due_datetime, '-' || t.reminder_offset || ' minutes') <= :now
-                     AND t.due_datetime >= datetime('now', 'localtime', '-30 minutes'))
+                    (t.due_datetime IS NOT NULL AND t.reminder_offset IS NOT NULL
+                     AND datetime(t.due_datetime, '-' || t.reminder_offset || ' minutes') <= :now
+                     AND t.due_datetime >= :min30)
                     OR
                     (t.reminder_custom IS NOT NULL AND t.reminder_custom <= :now
-                     AND t.reminder_custom >= datetime('now', 'localtime', '-30 minutes'))
+                     AND t.reminder_custom >= :min30)
                   )
                 ORDER BY COALESCE(t.reminder_custom, t.due_datetime) ASC
             ");
-            $stmt->execute(['uid' => $currentUserId, 'now' => $now]);
+            $stmt->execute(['uid' => $currentUserId, 'now' => $now, 'min30' => $min30]);
             $reminders = $stmt->fetchAll();
             jsonResponse($reminders);
+
+        /**
+         * 懒人模式：延时提醒
+         * POST: id, minutes (5/10/15/30)
+         */
+        case 'snooze_reminder':
+            requireAuth();
+            $taskId  = intval($_POST['id'] ?? 0);
+            $minutes = intval($_POST['minutes'] ?? 5);
+            if ($taskId <= 0 || !in_array($minutes, [5, 10, 15, 30])) {
+                jsonResponse([], false, '参数错误');
+            }
+            $stmt = $db->prepare("SELECT id, due_datetime FROM tasks WHERE id = :id AND user_id = :uid");
+            $stmt->execute(['id' => $taskId, 'uid' => $currentUserId]);
+            $task = $stmt->fetch();
+            if (!$task) jsonResponse([], false, '任务不存在');
+
+            // 将提醒时间设为 now + delay，reminder_offset 置 NULL 避免 due_datetime 路径重复触发
+            $newReminder = date('Y-m-d H:i', strtotime('+' . $minutes . ' minutes'));
+            $stmt = $db->prepare("UPDATE tasks SET reminder_custom = :rc, reminder_offset = NULL WHERE id = :id");
+            $stmt->execute(['rc' => $newReminder, 'id' => $taskId]);
+            jsonResponse(['reminder_custom' => $newReminder, 'minutes' => $minutes]);
+
+        /**
+         * 不再提醒：清除该任务所有提醒设置
+         * POST: id
+         */
+        case 'dismiss_reminder':
+            requireAuth();
+            $taskId = intval($_POST['id'] ?? 0);
+            if ($taskId <= 0) jsonResponse([], false, '参数错误');
+            $stmt = $db->prepare("UPDATE tasks SET reminder_custom = NULL, reminder_offset = NULL WHERE id = :id AND user_id = :uid");
+            $stmt->execute(['id' => $taskId, 'uid' => $currentUserId]);
+            if ($stmt->rowCount() === 0) jsonResponse([], false, '任务不存在');
+            jsonResponse(['dismissed' => true]);
 
         // ==================== v5.0 任务状态流转 ====================
 
@@ -1556,7 +1715,7 @@ try {
             requireAuth();
             $data  = getJsonInput();
             $theme = $data['theme'] ?? 'default';
-            if (!in_array($theme, ['default','green','pink','dark','ocean','sunset'])) {
+            if (!in_array($theme, ['default','green','pink','dark','ocean','sunset','stone','coffee','midnight','frost','sand','lavender'])) {
                 jsonResponse(null, 400, '无效的主题');
             }
             $stmt = $db->prepare("SELECT id FROM user_settings WHERE user_id = :uid");

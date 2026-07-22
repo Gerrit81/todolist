@@ -1,5 +1,5 @@
 /* =============================================================================
- * 任务管理系统 v2.2.7 — 前端应用逻辑
+ * 任务管理系统 v2.4.1 — 前端应用逻辑
  * 
  * 包含：
  *   1. 全局状态 / 初始化
@@ -27,6 +27,15 @@ let userSettings = {}, summaryStats = {}, notificationShown = false;
 let pomoTimer = null, pomoRunning = false, pomoIsBreak = false, pomoSeconds = 0, pomoTotalSeconds = 0, pomoWorkMin = 25, pomoBreakMin = 5, pomoTaskId = 0;
 let createAttachFiles = [], editAttachFiles = [], selectedHabitIcon = '📌', selectedHabitDays = [1,2,3,4,5,6,7];
 
+// ========== 工具函数 ==========
+/** 获取本地时区的 YYYY-MM-DD，不依赖任何 locale，兼容所有浏览器/OS */
+function localDateStr(d) {
+    d = d || new Date();
+    var m = d.getMonth() + 1, dt = d.getDate();
+    return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (dt < 10 ? '0' + dt : dt);
+}
+function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
 // ========== 初始化 ==========
 document.addEventListener('DOMContentLoaded', async () => {
     const authed = await checkAuth();
@@ -37,9 +46,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         initFullCalendar();
         switchNav('today');
         checkNotifications();
+        setInterval(checkNotifications, 30000); // 每30秒轮询提醒
         setInterval(() => {
             if (currentNav !== 'review' && currentView === 'list') loadTasks();
         }, 60000);
+    } else {
+        document.getElementById('authPage').classList.remove('hidden');
     }
 });
 
@@ -55,6 +67,9 @@ async function checkAuth() {
         const j = await r.json();
         if (j.success && j.data) {
             document.getElementById('headerUsername').textContent = '👤 ' + j.data.username;
+            if (j.data.role === 'admin') {
+                document.getElementById('adminLink').style.display = '';
+            }
             return true;
         }
     } catch (e) {}
@@ -72,6 +87,7 @@ function toggleAuthMode() {
     document.getElementById('authTitle').textContent = isLogin ? '注册帐号' : '任务管理系统';
     document.getElementById('authBtn').textContent = isLogin ? '注 册' : '登 录';
     document.getElementById('emailGroup').style.display = isLogin ? 'block' : 'none';
+    document.getElementById('rememberGroup').style.display = isLogin ? 'none' : 'block';
     document.getElementById('authSwitchText').textContent = isLogin ? '已有账号？' : '还没有账号？';
     document.getElementById('authSwitchLink').textContent = isLogin ? '立即登录' : '立即注册';
     clearAuthMsg();
@@ -84,7 +100,8 @@ async function login() {
     const u = document.getElementById('authUsername').value.trim(), p = document.getElementById('authPassword').value;
     if (!u || !p) { setAuthMsg('请输入用户名和密码', 'error'); return; }
     try {
-        const r = await fetch(API + '?action=login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: p }) });
+        const rememberMe = document.getElementById('rememberMe').checked;
+        const r = await fetch(API + '?action=login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: p, remember_me: rememberMe }) });
         const j = await r.json();
         if (j.success) { setAuthMsg('登录成功...', 'success'); setTimeout(() => location.reload(), 400); }
         else setAuthMsg(j.message || '登录失败', 'error');
@@ -110,12 +127,58 @@ async function logout() {
 }
 
 // ========== 主题 ==========
+const THEMES = [
+    { id:'default', name:'默认蓝', desc:'清爽办公蓝', dots:['#4A90D9','#85C1E9','#E8F1FB'] },
+    { id:'green',   name:'护眼绿', desc:'柔和润目', dots:['#3CB371','#90EE90','#E8F5E9'] },
+    { id:'pink',    name:'樱花粉', desc:'温暖甜美', dots:['#E87DA0','#F8BBD0','#FCE4EC'] },
+    { id:'ocean',   name:'海洋蓝', desc:'深邃稳重', dots:['#0077B6','#48CAE4','#E0F0FA'] },
+    { id:'sunset',  name:'日落橙', desc:'暖色活力', dots:['#E07B53','#FFB347','#FFF0E8'] },
+    { id:'stone',   name:'岩石灰', desc:'护眼低亮', dots:['#6B7B8D','#A0B0C0','#ECF0F2'] },
+    { id:'coffee',  name:'摩卡棕', desc:'暖调护眼', dots:['#8D6E5A','#C0A890','#EDE0D8'] },
+    { id:'dark',    name:'暗夜', desc:'夜间舒适', dots:['#6C8CFF','#4A5568','#1E2A45'] },
+    { id:'midnight',name:'深夜暗', desc:'极致暗色', dots:['#7B8CD0','#2A3045','#0D1117'] },
+    { id:'frost',   name:'毛玻璃', desc:'冰透朦胧', dots:['#7C8CE0','#E8EAFA','#F2F4FA'] },
+    { id:'sand',    name:'暖沙', desc:'仿纸书阅读', dots:['#C9A96E','#EDE0CC','#FDF5E6'] },
+    { id:'lavender',name:'薰衣草', desc:'柔紫低蓝光', dots:['#A78BFA','#D0C8E8','#F3F0FF'] },
+];
+
+let currentTheme = 'default';
+
+function buildThemeGrid() {
+    const grid = document.getElementById('themeGrid');
+    if (!grid) return;
+    grid.innerHTML = THEMES.map(t => {
+        const dots = t.dots.map(c => `<span class="tc-dot" style="background:${c}"></span>`).join('');
+        const cls = t.id === currentTheme ? ' active' : '';
+        return `<div class="theme-card${cls}" onclick="switchTheme('${t.id}')">
+            <div class="tc-dots">${dots}</div>
+            <div class="tc-name">${t.name}</div>
+            <div class="tc-desc">${t.desc}</div>
+        </div>`;
+    }).join('');
+    // 更新顶栏按钮状态
+    const btn = document.getElementById('themeBtn');
+    if (btn) {
+        const t = THEMES.find(x => x.id === currentTheme);
+        btn.title = '配色：' + (t ? t.name : currentTheme);
+    }
+}
+
+function showThemePicker() {
+    buildThemeGrid();
+    document.getElementById('themePicker').classList.add('show');
+}
+
+function closeThemePicker() {
+    document.getElementById('themePicker').classList.remove('show');
+}
+
 async function switchTheme(theme) {
+    currentTheme = theme;
     document.body.setAttribute('data-theme', theme);
-    document.querySelectorAll('.theme-dot').forEach(d => d.classList.remove('active'));
-    const td = document.querySelector(`.theme-dot[data-theme="${theme}"]`);
-    if (td) td.classList.add('active');
+    buildThemeGrid();
     try { await fetch(API + '?action=update_theme', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme }) }); } catch (e) {}
+    closeThemePicker();
 }
 
 // ========== 提醒设置 ==========
@@ -137,11 +200,12 @@ async function loadSettings() {
                 theme: j.data.theme || 'default'
             };
             if (userSettings.theme && userSettings.theme !== 'default') {
+                currentTheme = userSettings.theme;
                 document.body.setAttribute('data-theme', userSettings.theme);
-                document.querySelectorAll('.theme-dot').forEach(d => d.classList.remove('active'));
-                const td = document.querySelector(`.theme-dot[data-theme="${userSettings.theme}"]`);
-                if (td) td.classList.add('active');
+            } else {
+                currentTheme = 'default';
             }
+            buildThemeGrid();
         }
         syncSettingsToUI();
     } catch (e) {}
@@ -516,19 +580,18 @@ function renderTaskRow(t, isTrash = false) {
     const statusLabel = { todo: '📝 待办', doing: '🔄 处理中', done: '✅ 完成' };
     const statusClass = { todo: '', doing: 'doing', done: 'done' };
 
-    // 虚拟重复实例：只读展示，不可操作
+    // 虚拟重复实例：可完成，checkbox 保持独立；🔁 标志移到标题
     if (t._virtual == 1) {
         const recurLabel = formatRecurrenceLabel(t.recurrence_type, t.recurrence_rule);
         return `<div class="task-item virtual-task${subClass}">
-            <div class="task-checkbox virtual" title="重复任务「${esc(t.title)}」的预排实例，完成当前期后将自动生成">🔁</div>
-            <div class="task-content">
-                <div class="task-title">${titlePrefix}${esc(t.title)} <span class="virtual-badge" title="${recurLabel}">预排</span></div>
+            <div class="task-checkbox" onclick="toggleTask(${t.id},${t.is_completed == 1 ? 0 : 1})" title="标记此预排实例为完成"> </div>
+            <div class="task-content" onclick="editTask(${t.id})">
+                <div class="task-title">${titlePrefix}${esc(t.title)} ${recurIcon} <span class="virtual-badge" title="${recurLabel}">预排</span></div>
                 <div class="task-meta">
                     ${t.category_name ? `<span class="task-category-tag" style="background:${esc(t.category_color || '#95A5A6')}">${esc(t.category_name)}</span>` : ''}
                     <span style="background:${pc(t.priority)};color:#fff;padding:1px 6px;border-radius:8px;font-size:11px">${pl}</span>
                     ${timeHtml}
                     <div class="task-tags">${tagsHtml}</div>
-                    ${recurIcon}
                     ${subBadge}
                 </div>
             </div>
@@ -541,14 +604,13 @@ function renderTaskRow(t, isTrash = false) {
     return `<div class="task-item${cc}${dc}${subClass}" id="task-${t.id}">
         <div class="task-checkbox" onclick="toggleTask(${t.id},${t.is_completed == 1 ? 0 : 1})" title="${t.is_completed == 1 ? '标记未完成' : '标记已完成'}">${check}</div>
         <div class="task-content" onclick="editTask(${t.id})">
-            <div class="task-title">${titlePrefix}${esc(t.title)}${t.notes ? ' <span style="color:var(--text-muted);font-size:11px">📝</span>' : ''}${isSubtask ? ' <span class="task-tag-mini" style="background:var(--text-muted);color:#fff">子任务</span>' : ''}</div>
+            <div class="task-title">${titlePrefix}${esc(t.title)}${recurIcon}${t.notes ? ' <span style="color:var(--text-muted);font-size:11px">📝</span>' : ''}${isSubtask ? ' <span class="task-tag-mini" style="background:var(--text-muted);color:#fff">子任务</span>' : ''}</div>
             <div class="task-meta">
                 ${t.category_name ? `<span class="task-category-tag" style="background:${esc(t.category_color || '#95A5A6')}">${esc(t.category_name)}</span>` : ''}
                 <span style="background:${pc(t.priority)};color:#fff;padding:1px 6px;border-radius:8px;font-size:11px">${pl}</span>
                 ${timeHtml}
                 <div class="task-tags">${tagsHtml}</div>
                 ${pomoCount}
-                ${recurIcon}
                 ${subBadge}
             </div>
         </div>
@@ -562,7 +624,7 @@ function renderTaskRow(t, isTrash = false) {
 function formatTaskTime(t) {
     if (!t.due_datetime) return '';
     const parts = t.due_datetime.split(' '), dp = parts[0].split('-'), time = parts[1] ? parts[1].substring(0, 5) : '';
-    const today = new Date().toISOString().slice(0, 10), tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10), d = parts[0];
+    const now = new Date(), tm = new Date(now); tm.setDate(tm.getDate() + 1); const today = localDateStr(now), tomorrow = localDateStr(tm), d = parts[0];
     let cls = 'upcoming', txt = `${parseInt(dp[1])}月${parseInt(dp[2])}日 ${time}`;
     if (t.is_completed == 1) { } else if (d < today) { cls = 'overdue'; txt = `${parseInt(dp[1])}月${parseInt(dp[2])}日 ${time} (逾期)`; }
     else if (d === today) { cls = 'today-due'; txt = `今天 ${time}`; }
@@ -677,7 +739,7 @@ async function editTask(id) {
         // 重复任务
         document.getElementById('editRecurrenceType').value = t.recurrence_type || '';
         document.getElementById('editRecurrenceEnd').value = t.recurrence_end || '';
-        document.getElementById('editRecurrenceStart').value = t.recurrence_start || '';
+        document.getElementById('editStartDate').value = t.recurrence_start || '';
         try {
             const rrule = JSON.parse(t.recurrence_rule || '{}');
             if (t.recurrence_type === 'weekly') {
@@ -742,7 +804,7 @@ async function saveTaskEdit() {
                 recurrence_type: document.getElementById('editRecurrenceType').value,
                 recurrence_rule: getEditRecurrenceRule(),
                 recurrence_end: document.getElementById('editRecurrenceEnd').value || null,
-                recurrence_start: document.getElementById('editRecurrenceStart').value || null,
+                recurrence_start: document.getElementById('editStartDate').value || null,
                 tag_ids: selectedEditTags
             })
         });
@@ -836,7 +898,7 @@ async function renderMonthView() {
         const r = await fetch(API + `?action=calendar_tasks&year=${y}&month=${m}`);
         const j = await r.json();
         const cal = j.success ? j.data.calendar : {};
-        const today = new Date().toISOString().slice(0, 10);
+        const today = localDateStr();
         const first = new Date(y, m - 1, 1);
         const last = new Date(y, m, 0);
         let sd = first.getDay(); sd = sd === 0 ? 6 : sd - 1;
@@ -895,7 +957,7 @@ async function renderWeekView() {
         results.forEach(j => { if (j.success && j.data.calendar) Object.assign(allCal, j.data.calendar); });
     } catch (e) {}
 
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDateStr();
     const dayLabels = ['一', '二', '三', '四', '五', '六', '日'];
     let h = '';
     weekDates.forEach((d, idx) => {
@@ -1153,21 +1215,128 @@ async function showReview() {
 }
 
 // ========== 桌面通知与提醒 ==========
+let shownReminderIds = {};  // 已弹出提醒弹窗的任务ID -> timer，避免重复弹窗
 async function checkNotifications() {
     try {
         const r = await fetch(API + '?action=today_reminders');
         const j = await r.json();
         if (!j.success || !j.data || j.data.length === 0) return;
+        const tasks = j.data;
+        // 声音 & 标签闪烁 & 桌面通知
         if (userSettings.sound_enabled) playBeep();
-        if (userSettings.tab_flash_enabled) startTabFlash(j.data.length);
+        if (userSettings.tab_flash_enabled) startTabFlash(tasks.length);
         if ('Notification' in window) {
             if (Notification.permission === 'default') await Notification.requestPermission();
             if (Notification.permission === 'granted' && !notificationShown) {
                 notificationShown = true;
-                new Notification('📋 任务提醒 (' + j.data.length + ' 项)', { body: j.data.map((r, i) => (i + 1) + '. ' + r.title).join('\n'), tag: 'todolist-daily' });
+                new Notification('📋 任务提醒 (' + tasks.length + ' 项)', { body: tasks.map((t, i) => (i + 1) + '. ' + t.title).join('\n'), tag: 'todolist-daily' });
             }
         }
+        // 右下角弹窗提醒（懒人模式）
+        tasks.forEach(t => {
+            if (!shownReminderIds[t.id]) showReminderPopup(t);
+        });
     } catch (e) {}
+}
+
+/** 右下角提醒弹窗 */
+function showReminderPopup(task) {
+    const ct = document.getElementById('reminderPopupContainer');
+    if (!ct) return;
+    shownReminderIds[task.id] = true;
+
+    // 格式化时间
+    const t = task.due_datetime ? task.due_datetime.slice(11, 16) : '';
+    const now = new Date();
+    let timeLabel = '';
+    if (task.due_datetime) {
+        const d = task.due_datetime.slice(0, 10);
+        const tm = new Date(d + 'T' + task.due_datetime.slice(11, 16));
+        const diffMin = Math.round((now - tm) / 60000);
+        if (diffMin < -1) timeLabel = '还有 ' + Math.abs(diffMin) + ' 分钟';
+        else if (diffMin < 0) timeLabel = '即将到期';
+        else if (diffMin < 1) timeLabel = '就是现在！';
+        else if (diffMin < 60) timeLabel = '已逾期 ' + diffMin + ' 分钟';
+        else timeLabel = '已逾期 ' + Math.floor(diffMin / 60) + ' 小时';
+    }
+
+    const priorityColors = { 3: '#ef4444', 2: '#f59e0b', 1: '#3b82f6' };
+    const priorityLabels = { 3: '高', 2: '中', 1: '低' };
+    const pc = priorityColors[task.priority] || '#999';
+    const pl = priorityLabels[task.priority] || '';
+
+    const el = document.createElement('div');
+    el.className = 'reminder-popup';
+    el.id = 'rem-popup-' + task.id;
+    el.innerHTML = `
+        <div class="rem-popup-bar" style="background:${pc}"></div>
+        <button class="rem-btn-close" onclick="dismissReminderPopup(${task.id})" title="关闭">✕</button>
+        <div class="rem-popup-body">
+            <div class="rem-popup-header">
+                <span class="rem-popup-priority" style="background:${pc};color:#fff">${pl}</span>
+                <span class="rem-popup-time">⏰ ${t}${timeLabel ? ' <em>' + timeLabel + '</em>' : ''}</span>
+            </div>
+            <div class="rem-popup-title">${escHtml(task.title)}</div>
+            ${task.category_name ? '<div class="rem-popup-cat">📂 ' + escHtml(task.category_name) + '</div>' : ''}
+            <div class="rem-popup-actions">
+                <button class="rem-btn rem-btn-done" onclick="dismissFromReminder(${task.id})">⊘ 不再提醒</button>
+                <button class="rem-btn rem-btn-snooze" onclick="snoozeReminder(${task.id},5)">+5分</button>
+                <button class="rem-btn rem-btn-snooze" onclick="snoozeReminder(${task.id},10)">+10分</button>
+                <button class="rem-btn rem-btn-snooze" onclick="snoozeReminder(${task.id},15)">+15分</button>
+                <button class="rem-btn rem-btn-snooze" onclick="snoozeReminder(${task.id},30)">+30分</button>
+            </div>
+        </div>`;
+    ct.appendChild(el);
+    // 入场动画
+    requestAnimationFrame(() => el.classList.add('rem-popup-show'));
+    // 60秒后自动消失
+    const timer = setTimeout(() => dismissReminderPopup(task.id), 60000);
+    el._autoClose = timer;
+}
+
+/** 延时提醒 */
+async function snoozeReminder(taskId, minutes) {
+    const el = document.getElementById('rem-popup-' + taskId);
+    if (el) { el.classList.remove('rem-popup-show'); setTimeout(() => el.remove(), 300); }
+    if (el && el._autoClose) clearTimeout(el._autoClose);
+    // 前一次延时定时器（如有）先清掉
+    if (typeof shownReminderIds[taskId] === 'number') clearTimeout(shownReminderIds[taskId]);
+    // 前端兜底封锁：延时期间不弹窗，不依赖后端是否成功
+    shownReminderIds[taskId] = setTimeout(() => { delete shownReminderIds[taskId]; }, minutes * 60 * 1000 + 3000);
+    try {
+        const fd = new FormData();
+        fd.append('id', taskId);
+        fd.append('minutes', minutes);
+        await fetch(API + '?action=snooze_reminder', { method: 'POST', body: fd });
+        showToast('已延时 +' + minutes + ' 分钟提醒', 'info');
+    } catch (e) { showToast('操作失败', 'error'); }
+}
+
+/** 不再提醒：清除该任务所有提醒设置 */
+async function dismissFromReminder(taskId) {
+    const el = document.getElementById('rem-popup-' + taskId);
+    if (el) { el.classList.add('rem-popup-remove'); setTimeout(() => el.remove(), 300); }
+    if (el && el._autoClose) clearTimeout(el._autoClose);
+    // 前端兜底：永久封锁，该页面生命周期内不再弹窗
+    if (typeof shownReminderIds[taskId] === 'number') clearTimeout(shownReminderIds[taskId]);
+    shownReminderIds[taskId] = 'dismissed';
+    try {
+        const fd = new FormData();
+        fd.append('id', taskId);
+        await fetch(API + '?action=dismiss_reminder', { method: 'POST', body: fd });
+        showToast('已不再提醒', 'info');
+    } catch (e) { showToast('操作失败', 'error'); }
+}
+
+/** 关闭提醒弹窗（仅关闭窗口，不改变封锁状态） */
+function dismissReminderPopup(taskId) {
+    const el = document.getElementById('rem-popup-' + taskId);
+    if (!el) return;
+    el.classList.add('rem-popup-remove');
+    if (el._autoClose) clearTimeout(el._autoClose);
+    setTimeout(() => el.remove(), 300);
+    // 只有"展示中"状态（true）才清除，延时/永久封锁保留
+    if (shownReminderIds[taskId] === true) delete shownReminderIds[taskId];
 }
 
 function playBeep() {
@@ -1215,14 +1384,14 @@ function showTaskCreateDialog() {
     document.getElementById('createTaskTitle').value = '';
     document.getElementById('createTaskDescription').value = '';
     document.getElementById('createTaskNotes').value = '';
-    document.getElementById('createTaskDate').value = new Date().toISOString().slice(0, 10);
+    document.getElementById('createTaskDate').value = localDateStr();
     document.getElementById('createTaskTime').value = '09:00';
     document.getElementById('createTaskReminder').value = '0';
     document.getElementById('createReminderDatetime').value = '';
     document.getElementById('createReminderCustomField').classList.add('hidden');
     document.getElementById('createRecurrenceType').value = '';
     document.getElementById('createRecurrenceEnd').value = '';
-    document.getElementById('createRecurrenceStart').value = '';
+    document.getElementById('createStartDate').value = '';
     toggleCreateRecurrence();
     document.getElementById('createTaskPriority').value = 'medium';
     createAttachFiles = [];
@@ -1285,7 +1454,7 @@ async function saveTaskCreate() {
                 recurrence_type: document.getElementById('createRecurrenceType').value,
                 recurrence_rule: getCreateRecurrenceRule(),
                 recurrence_end: document.getElementById('createRecurrenceEnd').value || null,
-                recurrence_start: document.getElementById('createRecurrenceStart').value || null,
+                recurrence_start: document.getElementById('createStartDate').value || null,
                 tag_ids: selectedQuickTags
             })
         });
@@ -1315,7 +1484,6 @@ function toggleEditReminderCustom() {
 function toggleEditRecurrence() {
     const t = document.getElementById('editRecurrenceType').value;
     document.getElementById('editRecurrenceEndField').classList.toggle('hidden', !t);
-    document.getElementById('editRecurrenceStartField').classList.toggle('hidden', !t);
     document.getElementById('editWeeklyDays').classList.toggle('hidden', t !== 'weekly');
     document.getElementById('editMonthlyDay').classList.toggle('hidden', t !== 'monthly');
     document.getElementById('editYearlyDate').classList.toggle('hidden', t !== 'yearly');
@@ -1323,7 +1491,6 @@ function toggleEditRecurrence() {
 function toggleCreateRecurrence() {
     const t = document.getElementById('createRecurrenceType').value;
     document.getElementById('createRecurrenceEndField').classList.toggle('hidden', !t);
-    document.getElementById('createRecurrenceStartField').classList.toggle('hidden', !t);
     document.getElementById('createWeeklyDays').classList.toggle('hidden', t !== 'weekly');
     document.getElementById('createMonthlyDay').classList.toggle('hidden', t !== 'monthly');
     document.getElementById('createYearlyDate').classList.toggle('hidden', t !== 'yearly');

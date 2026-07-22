@@ -11,9 +11,10 @@
  *   4. 用户认证（注册/登录/登出/PHP Session）
  *   5. 纯 PHP 实现的 SMTP 邮件发送（无需第三方依赖）
  *   6. 提供统一的 JSON 响应、日志记录等工具函数
- *   7. 自动数据库迁移（v1→v2→v3）
+ *   7. 自动数据库迁移（v1→v2→…→v9）
+ *   8. 管理员辅助函数（isAdmin / requireAdmin / 登录记录 / 管理设置）
  *
- * @version  2.2.7
+ * @version  3.0.0
  * @date     2026-07-18
  * =============================================================================
  */
@@ -63,7 +64,44 @@ if (is_dir($sessionSavePath) && is_writable($sessionSavePath)) {
 
 // 启动 PHP Session（用于用户登录状态保持）
 if (session_status() === PHP_SESSION_NONE) {
+    // 设置 Session 生命周期：默认 30 天，避免服务器端过早清理导致"刷新跳回登录"
+    $sessionLifetime = 30 * 24 * 3600;
+
+    // 【关键】在 session_start() 之前设置 cookie_lifetime
+    // 这样 PHP 发送的 session cookie 本身就带 30 天过期时间
+    // 避免 IIS 上先发短期 cookie 再被后续 setcookie() 覆盖不生效的问题
+    ini_set('session.cookie_lifetime', $sessionLifetime);
+    ini_set('session.cookie_path', '/');
+    ini_set('session.cookie_httponly', '1');
+    ini_set('session.cookie_samesite', 'Lax');
+
+    // 服务器端 GC 设置
+    ini_set('session.gc_maxlifetime', $sessionLifetime);
+    // IIS 上 gc 可能触发频繁，降低清理概率（1/100 的请求触发 gc）
+    ini_set('session.gc_probability', 1);
+    ini_set('session.gc_divisor', 100);
+
+    session_name('TODOSESSID');
     session_start();
+}
+
+// 「保持登录」持久化 Cookie：勾选「保持登录」的用户，每次请求刷新 30 天有效期
+// 使用 PHP 7.3+ 数组语法，确保 cookie 属性在 IIS / Apache 上表现一致
+if (!empty($_SESSION['user_id']) && !empty($_SESSION['persist_login'])) {
+    $lifetime = 30 * 24 * 3600;
+    if (PHP_VERSION_ID >= 70300) {
+        setcookie(session_name(), session_id(), [
+            'expires'  => time() + $lifetime,
+            'path'     => '/',
+            'domain'   => '',
+            'secure'   => false,
+            'httponly' => true,
+            'samesite' => 'Lax'
+        ]);
+    } else {
+        // 降级兼容 PHP < 7.3
+        setcookie(session_name(), session_id(), time() + $lifetime, '/', '', false, true);
+    }
 }
 
 // -------------------- 应用配置 --------------------
@@ -71,7 +109,7 @@ if (session_status() === PHP_SESSION_NONE) {
 $config = [
     // 应用基本信息
     'app_name'    => '任务管理系统',
-    'app_version' => '2.2.7',
+    'app_version' => '3.1.3',
 
     // SQLite 数据库文件路径（存放在 data 目录下，确保该目录可写）
     // 外网部署建议移到 Web 根目录之外，例如：
@@ -84,6 +122,10 @@ $config = [
     // SMTP 密码加密密钥（部署后务必修改为随机字符串！）
     // 生成方法：php -r "echo bin2hex(random_bytes(32));"
     'encrypt_key' => 'todolist-default-key-change-on-deploy',
+
+    // 数据库自动备份配置
+    'backup_path'  => __DIR__ . '/data/backups/',   // 备份存放目录
+    'backup_max'   => 15,                             // 最多保留份数
 ];
 
 
@@ -493,6 +535,65 @@ function initDatabase($db) {
         }
     } catch (Exception $e) { /* 迁移已处理 */ }
 
+    // v9.0 迁移：后台管理功能 —— 角色、登录历史、密码重置令牌、管理设置
+    try {
+        $cols = $db->query("PRAGMA table_info(users)")->fetchAll();
+        $hasRole = false; $hasLastLogin = false; $hasLoginCount = false;
+        foreach ($cols as $col) {
+            if ($col['name'] === 'role')          $hasRole = true;
+            if ($col['name'] === 'last_login_at') $hasLastLogin = true;
+            if ($col['name'] === 'login_count')   $hasLoginCount = true;
+        }
+        if (!$hasRole)        $db->exec("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'");
+        if (!$hasLastLogin)   $db->exec("ALTER TABLE users ADD COLUMN last_login_at TEXT DEFAULT ''");
+        if (!$hasLoginCount)  $db->exec("ALTER TABLE users ADD COLUMN login_count INTEGER DEFAULT 0");
+
+        // 自动提权：第一个注册的用户默认为管理员
+        $hasAdmin = $db->query("SELECT COUNT(*) FROM users WHERE role = 'admin'")->fetchColumn();
+        if ($hasAdmin == 0) {
+            $db->exec("UPDATE users SET role = 'admin' WHERE id = (SELECT MIN(id) FROM users) AND id > 0");
+        }
+    } catch (Exception $e) { /* 迁移已处理 */ }
+
+    // 登录历史表
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS login_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL,
+            login_at    TEXT NOT NULL,
+            ip_address  TEXT DEFAULT '',
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    ");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_login_history_uid ON login_history(user_id)");
+
+    // 密码重置令牌表
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS password_resets (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL,
+            token       TEXT NOT NULL UNIQUE,
+            expires_at  TEXT NOT NULL,
+            used        INTEGER DEFAULT 0,
+            created_at  TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    ");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_pw_resets_token ON password_resets(token)");
+
+    // 管理设置表
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS admin_settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ");
+    $existing = $db->query("SELECT COUNT(*) FROM admin_settings")->fetchColumn();
+    if ($existing == 0) {
+        $db->exec("INSERT INTO admin_settings (key, value) VALUES ('backup_auto_clean_days', '0')");
+        $db->exec("INSERT INTO admin_settings (key, value) VALUES ('backup_max_count', '15')");
+    }
+
 
     // ========================
     // 创建索引
@@ -553,6 +654,45 @@ function requireAuth() {
     if (getCurrentUserId() <= 0) {
         jsonResponse(null, 401, '请先登录');
     }
+}
+
+// -------------------- 管理员辅助函数 --------------------
+
+function isAdmin() {
+    $userId = getCurrentUserId();
+    if ($userId <= 0) return false;
+    global $config;
+    $db = getDB($config);
+    $stmt = $db->prepare('SELECT role FROM users WHERE id = ?');
+    $stmt->execute([$userId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return $row && $row['role'] === 'admin';
+}
+
+function requireAdmin() {
+    if (!isAdmin()) {
+        jsonResponse(null, 403, '需要管理员权限');
+    }
+}
+
+function recordLoginHistory($db, $userId) {
+    $ip  = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    $now = date('Y-m-d H:i:s');
+    $stmt = $db->prepare("INSERT INTO login_history (user_id, login_at, ip_address) VALUES (?, ?, ?)");
+    $stmt->execute([$userId, $now, $ip]);
+    $db->exec("UPDATE users SET last_login_at = '{$now}', login_count = login_count + 1 WHERE id = {$userId}");
+}
+
+function getAdminSetting($db, $key, $default = '') {
+    $stmt = $db->prepare("SELECT value FROM admin_settings WHERE key = ?");
+    $stmt->execute([$key]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return $row ? $row['value'] : $default;
+}
+
+function setAdminSetting($db, $key, $value) {
+    $stmt = $db->prepare("INSERT OR REPLACE INTO admin_settings (key, value) VALUES (?, ?)");
+    $stmt->execute([$key, $value]);
 }
 
 function createDefaultCategoriesForUser($db, $userId) {
@@ -709,6 +849,82 @@ function decryptSensitive($data, $config) {
     $encrypted = substr($data, 16);
     $result    = openssl_decrypt($encrypted, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
     return ($result === false) ? '' : $result;
+}
+
+// -------------------- 数据库自动备份 --------------------
+
+/**
+ * 每日自动备份数据库（惰性触发）
+ *
+ * 在每次 API 请求时调用，检查今天是否已备份：
+ *   - 已备份 → 直接返回
+ *   - 未备份 → 执行 SQLite 在线备份，保留最近 N 份（默认 15）
+ *
+ * 备份文件命名：todolist_backup_YYYY-MM-DD_HHmmss.db
+ * 同一天多次调用只执行一次（以日期判断）。
+ *
+ * @param array $config 应用配置（需包含 db_path / backup_path / backup_max）
+ */
+function autoBackupDaily($config) {
+    $dbPath     = $config['db_path'];
+    $backupDir  = rtrim($config['backup_path'] ?? (dirname($dbPath) . '/backups/'), '/') . '/';
+    $maxCopies  = intval($config['backup_max'] ?? 15);
+
+    if (!file_exists($dbPath)) return;
+
+    // ---- 检查今天是否已有备份 ----
+    $todayPattern = $backupDir . 'todolist_backup_' . date('Y-m-d') . '_*.db';
+    $todayBackups = glob($todayPattern);
+    if (!empty($todayBackups)) return;  // 今天已备份
+
+    // ---- 创建备份目录 ----
+    if (!is_dir($backupDir)) {
+        @mkdir($backupDir, 0755, true);
+        if (!is_dir($backupDir)) return;
+    }
+
+    $timestamp  = date('Y-m-d_His');
+    $backupFile = $backupDir . 'todolist_backup_' . $timestamp . '.db';
+
+    try {
+        $src = new SQLite3($dbPath);
+        $src->exec('PRAGMA journal_mode=WAL');
+        $src->exec('PRAGMA wal_checkpoint(FULL)');
+
+        $dst = new SQLite3($backupFile);
+        $src->backup($dst);
+        $src->close();
+        $dst->close();
+
+        // ---- 清理旧备份（优先使用后台管理设置） ----
+        $adminDb = getDB($config);
+        $adminMaxCount = intval(getAdminSetting($adminDb, 'backup_max_count', strval($maxCopies)));
+        $adminCleanDays = intval(getAdminSetting($adminDb, 'backup_auto_clean_days', '0'));
+
+        $files = glob($backupDir . 'todolist_backup_*.db');
+        if ($files === false) $files = [];
+        rsort($files);
+
+        // 按天数清理
+        if ($adminCleanDays > 0) {
+            $cutoff = time() - $adminCleanDays * 86400;
+            $files = array_values(array_filter($files, function($f) use ($cutoff) {
+                if (filemtime($f) < $cutoff) { @unlink($f); return false; }
+                return true;
+            }));
+            rsort($files);
+        }
+        // 按数量清理
+        foreach ($files as $i => $file) {
+            if ($i >= $adminMaxCount) @unlink($file);
+        }
+
+    } catch (Exception $e) {
+        // 备份静默失败，不影响正常请求
+        if (function_exists('writeLog')) {
+            writeLog("自动备份失败: " . $e->getMessage(), [], $config);
+        }
+    }
 }
 
 // -------------------- 工具函数 --------------------

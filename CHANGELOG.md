@@ -1,6 +1,287 @@
-# 更新日志 (CHANGELOG)
+# 更新日志
+
+## v3.1.3 (2026-07-22)
+### 修复 — 前端兜底封锁，彻底杜绝弹窗重复
+- 🛡️ **前端三态封锁**：`shownReminderIds` 值类型化为三态 —— `true`（展示中）、定时器ID（延时封锁）、`'dismissed'`（永久封锁）。不管后端 API 是否成功执行，前端自己保证不重复弹窗
+  - 延时：`setTimeout` 封锁 N 分钟+3s 缓冲，期间 `dismissReminderPopup`（含 60s 自动关闭）不动封锁状态
+  - 不再提醒：封锁值设为 `'dismissed'`，该页面生命周期内永不弹窗
+  - 重复点击延时：自动清除旧定时器，以最新时长为准
+- 🔧 **phpStudy Nginx 用户注意**：如果后端 `snooze_reminder` 仍旧不生效，可能是 PHP-FPM opcache 缓存了旧 `api.php`。phpStudy 中需单独重启 PHP（而非仅重启 Nginx）
+
+## v3.1.2 (2026-07-22)
+### 修复 — 弹窗仍然重复弹出 & 关闭按钮位置优化
+- 🐛 **NULL 在 SQLite datetime() 中不生效**：上一版把 `reminder_offset` 设为 `NULL` 想阻断 due 路径，但 SQLite 的 `datetime(due_datetime, NULL)` 直接返回原值而非 NULL，逾期任务照旧命中。改为在 due 路径加显式 `t.reminder_offset IS NOT NULL` 守卫，真正阻断
+- 🎨 **关闭按钮移至右上角**：✕ 从底部操作栏移到弹窗右上角，与其他弹窗设计语言统一
+
+## v3.1.1 (2026-07-22)
+### 修复 — 提醒弹窗重复弹出 & "完成"语义优化
+- 🐛 **延时后弹窗立即重新弹出**：`snooze_reminder` 将 `reminder_offset` 设为 `0`，导致 SQLite 中 `datetime(due_datetime, '-0 minutes')` = 原值，逾期任务的 due 路径再次命中。改为 `NULL`，使表达式结果为 NULL（WHERE 自动判假）
+- 🔕 **"完成"→"不再提醒"**：原按钮调用 `toggle_task` 将任务标记为已完成，容易和常规"完成任务"混淆。改为 `dismiss_reminder` 接口，仅清除 `reminder_custom` + `reminder_offset`，任务本身不受影响
+- 🔄 **新增 `dismiss_reminder` API**：清除指定任务的所有提醒设置
+
+## v3.1.0 (2026-07-22)
+### 新增 — 懒人提醒模式
+- 🔔 **智能轮询提醒**：每 30 秒自动检查提醒任务，不再仅靠页面加载触发
+- 💬 **右下角弹窗提醒**：提醒任务以卡片形式从右下角滑入，显示任务名、优先级、截止时间、逾期时长
+- ⏰ **懒人延时**：未完成任务可一键延时 +5 / +10 / +15 / +30 分钟再次提醒
+- ✅ **弹窗中直接完成**：无需跳转，弹窗内即可标记完成任务
+- 🛠 **`today_reminders` 时区修复**：遗漏的 SQLite `datetime('now','localtime')` 改用 PHP `date()`，Windows Server 兼容
+- 🔄 **`snooze_reminder` API**：新增延时提醒后端接口
+
+## v3.0.2 (2026-07-21)
+### 修复 — 后台样式统一 & 布局重构
+- 🐛 **修复 Tab 文字不可见**：Body 缺少 `data-theme` 属性，CSS 变量全部未定义；激活态白字 + 渐变回退透明 = 不可见
+- 🏠 **页眉统一**：后台改用前端 `.header` 组件（sticky 定位、毛玻璃背景）
+- 👣 **页脚固定**：提取 `_foot.php` 共用；admin body 改为 flex 全屏布局（`height:100vh;flex-direction:column`），内容区 `flex:1;overflow:auto` 负责滚动，页眉页脚始终固定不动
+- 🔲 **内容区边框**：`admin-wrap` 毛玻璃边框 + 圆角
+- 🎨 **登录页优化**：覆盖层 `position:fixed`，全屏居中
+- 🕐 **修复 UTC 时区导致相对日期显示错误（彻底版）**：
+  - **JS 端**：`toLocaleDateString('sv-SE')` 在部分 Windows 浏览器中 locale 不可用时会回退到系统格式（如 `7/21/2026`），日期比较失败。改用自主 `localDateStr()` 函数（`getFullYear`+`getMonth`+`getDate`），零 locale 依赖
+  - **PHP 端**：SQLite `date('now','localtime')` 走 OS 时区而非 PHP 时区。Windows Server 系统时区常为 UTC，导致 `today`/`upcoming`/邮件提醒的任务筛选日期错误。4 处全部改为 PHP `date('Y-m-d')` 计算后传参
+- 🧹 **`localDateStr()` 兼容性**：`padStart` 在部分旧浏览器中不支持，改用三目运算补零
+- 🔄 **缓存版本号**：CSS/JS 引用添加 `?v=版本号`，更新后无需手动 Ctrl+F5 即可自动加载新文件
+
+## v3.0.0 (2026-07-20)
+
+## v3.0.1 (2026-07-20)
+### 优化 — 后台页面美化
+- 🪟 **全局毛玻璃效果**：header / 卡片 / 表格 / 弹窗 / Toast 全部使用 `backdrop-filter: blur()` 半透明玻璃态
+- 🎨 **渐变装饰**：body 浮动彩色光球背景动画，登录页双光晕呼吸效果
+- 📊 **统计卡片重构**：顶部彩色渐变线 + 图标圆角方块 + hover 上浮阴影
+- 📑 **Tab 导航**：从下划线改为胶囊按钮组，激活态渐变填充
+- 🏷️ **Badge 渐变**：角色/状态标签改为渐变底色 + 细边框
+- 🔲 **表格包装器**：`admin-table-wrapper` 统一边框圆角容器
+- 📦 **分区卡片**：`section-card` / `setting-card` 毛玻璃容器，内容分组清晰
+- ✨ **动画**：面板切换 fadeSlide、弹窗 scale+blur 入场、Toast 滑入
+### 新增 — 后台管理系统
+- 🛡️ **管理员系统**：用户表增加 `role` 字段（admin/user），首个注册用户自动获得管理员权限
+- 📊 **仪表盘**：用户/任务/数据库/备份统计数据 + 最近 10 条登录记录
+- 👥 **用户管理**：用户列表、登录历史记录、管理员角色切换（提权/降权）、删除用户
+- 🔑 **密码重置**：管理员可生成带时效的重置链接（10分钟/30分钟/3小时/8小时），复制或发送给用户自行重置密码
+- 💾 **备份管理**：查看/创建/下载/删除备份，可配置自动清理天数 & 最大保留份数，一键清理过期备份
+- 🖥 **系统信息**：PHP版本、服务器环境、数据库/磁盘空间、内存限制等
+- 📝 **登录历史**：每次登录自动记录时间 + IP，可在管理后台按用户查看
+### 新增文件
+- `admin.php` — 后台管理面板（完整登录 → 鉴权 → 面板流程）
+- `reset_password.php` — 面向用户的密码重置页面（令牌校验 + 改密表单）
+### 修改
+- `config.php` — v9 数据库迁移（role/登录历史/重置令牌/管理设置表）+ admin 辅助函数
+- `api.php` — 登录时自动记录登录历史；`check_auth` 返回用户角色
+- `index.php` — 管理员用户在顶栏显示后台入口链接（🔐）
+- `js/app.js` — `checkAuth()` 根据角色显示/隐藏后台链接
+- `backup.php` / `config.php::autoBackupDaily` — 每日自动备份策略融合后台管理设置
+
+## v2.4.3 (2026-07-20)
+### 修复
+- 修复刷新页面时登录界面一闪而过的问题：`#authPage` 默认也设为 `hidden`，等 `checkAuth()` 返回后才决定显示登录页还是主界面
+### 新增主题
+- 🏜️ 暖沙（sand）：暖黄纸感配色，仿纸质书阅读体验，低蓝光暖色调护眼
+- 💜 薰衣草（lavender）：柔紫色调，舒缓视觉，适合晚间光线较弱场景
+- 主题总数增至 12 套，4 行 × 3 列网格完整铺满 (CHANGELOG)
 
 本文件记录任务管理系统所有重要变更。
+
+---
+
+## [2.4.1] - 2026-07-20
+
+### 新增
+
+- **毛玻璃主题 `frost`**：冰透朦胧配色，大面积 `backdrop-filter: blur()` 实现毛玻璃效果
+  - 顶栏、侧栏、卡片、弹窗、任务项、按钮、输入框全部半透明模糊
+  - 紫蓝色主色调，`card-bg: rgba(255,255,255,.7)` 半透明白底
+  - 适合追求视觉层次感和现代 UI 风格的用户
+
+### 修复
+
+- **主题按钮点击无响应**：`showThemePicker` / `closeThemePicker` 错误使用 `hidden` 类来控制弹窗显隐
+  - 项目弹窗系统用 `.modal-overlay.show`（CSS `display:flex`）而非 `.hidden`（`display:none!important`）
+  - 修复为 `classList.add('show')` / `classList.remove('show')`
+
+### 改动文件
+
+- `css/style.css`：新增 `frost` 主题变量 + 毛玻璃特殊效果样式
+- `js/app.js`：THEMES 数组新增 frost；showThemePicker/closeThemePicker 改用 `.show` 类
+- `api.php`：主题白名单新增 `frost`
+
+---
+
+## [2.4.0] - 2026-07-20
+
+### 新增
+
+- **主题选择弹窗**：顶栏主题圆点替换为「🎨」按钮，点击弹出九宫格配色选择面板
+  - 每个主题方案以卡片形式展示，包含 3 色预览圆点 + 名称 + 描述
+  - 当前激活主题有蓝色边框高亮 + 发光阴影
+  - 点击卡片即时切换，关闭弹窗
+
+- **三套护眼新主题**：
+
+| 主题 | 代号 | 特点 |
+|------|------|------|
+| 岩石灰 | `stone` | 低亮中性灰色调，适合全天候办公护眼 |
+| 摩卡棕 | `coffee` | 暖棕色调，纸质书般柔和，仿真纸阅读体验 |
+| 深夜暗 | `midnight` | 极暗底色 (#0D1117)，比暗夜更深沉，适合深夜使用 |
+
+- **登录页毛玻璃风格**：
+  - 背景改为紫蓝粉渐变 + 浮动光斑装饰动画
+  - 登录卡片使用 `backdrop-filter: blur(24px)` 毛玻璃效果
+  - 半透明白色背景 + 白色边框，输入框透明底
+  - 按钮改为渐变紫色，带发光阴影
+  - 新增 📋 logo 图标
+
+### 修复
+
+- **Windows Server 自动登出问题**：
+  - **根因**：`session_start()` 先发送了一个无过期时间的 session cookie（浏览器会话级），然后 `setcookie` 尝试用长期 cookie 覆盖。IIS 上 cookie header 顺序可能让短期 cookie 优先生效，导致 IIS Application Pool 回收或浏览器空闲后 session 丢失。
+  - **修复**：
+    - 在 `session_start()` 之前设置 `session.cookie_lifetime = 2592000`（30 天），让 PHP 本身发出的 session cookie 就是长期的
+    - 设置 `session.cookie_path = /`、`session.cookie_httponly = 1`、`session.cookie_samesite = Lax`
+    - 调整 `session.gc_probability = 1` / `session.gc_divisor = 100`，降低 IIS 上 GC 触发频率
+    - `setcookie` 改用 PHP 7.3+ 数组参数语法，确保各平台 cookie 属性一致
+
+### 改动文件
+
+- `config.php`：Session 生命周期设置重写，cookie_lifetime 移到 `session_start()` 之前
+- `index.php`：登录页新增毛玻璃背景装饰层 + auth-input class；主题圆点替换为 🎨 按钮 + 主题选择弹窗 HTML
+- `css/style.css`：认证页全改毛玻璃风格；新增 stone/coffee/midnight 三套主题；主题选择弹窗样式；移除旧 theme-dot 代码
+- `js/app.js`：主题系统重构为九宫格弹窗模式，THEMES 数组 + buildThemeGrid / showThemePicker / closeThemePicker
+- `api.php`：主题白名单新增 stone/coffee/midnight
+
+---
+
+## [2.3.5] - 2026-07-20
+
+### 修复
+
+- **虚拟重复实例点击无响应 / 编辑报 400**：`expandRecurringTasks` 函数中 `$vt['id'] = null` 导致虚拟实例的 task ID 丢失
+  - 前端 `toggleTask(null, 1)` 和 `editTask(null)` 传入空 ID → 后端 400 → 复选框无响应、编辑弹窗报错
+  - 移除 `$vt['id'] = null`，虚拟实例保留真实 task ID，操作正确路由到对应真实任务
+
+### 改动文件
+
+- `api.php`：`expandRecurringTasks` 函数中删除 `$vt['id'] = null` 行
+
+---
+
+## [2.3.4] - 2026-07-20
+
+### 修复
+
+- **虚拟重复实例的循环图标覆盖复选框**：之前虚拟重复实例的 checkbox 被直接替换为 `🔁` 图标，无法点击完成
+  - 改为保留普通复选框，可点击标记预排实例完成
+  - `🔁 X次` 重复标志移到标题行，不再遮挡复选框
+  - 移除已废弃的 `.task-checkbox.virtual` 样式
+
+### 改动文件
+
+- `js/app.js`：虚拟任务 checkbox 改为普通可点击复选框，🔁 图标放入 task-title
+- `css/style.css`：移除 `.task-checkbox.virtual` 样式
+
+---
+
+## [2.3.3] - 2026-07-20
+
+### 修复
+
+- **循环标志溢出覆盖操作按钮**：标题行 `task-content` 缺少 `overflow:hidden` + `task-actions` 缺少 `flex-shrink:0`
+  - 当标题较长时，行内 `🔁 X次` 徽章会溢出 `task-content` 区域遮盖右侧「编辑/已完成」按钮
+  - 修复后内容区域自动裁剪，操作按钮始终保留完整宽度
+
+- **侧栏「今天」「最近7天」循环任务计数为 0**：`summary` 端点只统计 real tasks 的 `due_datetime`
+  - 循环任务完成推进后 `due_datetime` 移到未来，虚拟实例虽显示在列表中但不被计入 badge
+  - 修复：`summary` 展开循环任务虚拟实例，将原任务 `due_datetime` 已超范围的虚拟实例补入计数
+  - 自动去重：原任务 `due_datetime` 本身在范围内的不会被重复计数
+
+### 改动文件
+
+- `css/style.css`：`.task-content` 加 `overflow:hidden`、`.task-actions` 加 `flex-shrink:0`
+- `api.php`：`summary` 端点补充循环任务虚拟实例计数逻辑
+
+---
+
+## [2.3.2] - 2026-07-20
+
+### 修复
+
+- **重复任务图标覆盖复选框**：将「🔁 X次」重复标志从 `.task-meta` 移至 `.task-title` 标题旁
+  - 原来放在 meta 信息区，由于 `flex-wrap` 换行时可能靠近左侧 checkbox 区域，造成视觉上覆盖已完成复选框
+  - 现作为标题行内小徽章展示，不会与 checkbox 产生布局冲突
+  - 已完成任务中 `task-recur-icon` 取消 `line-through` 贯穿线，保持可读
+
+### 改动文件
+
+- `js/app.js`：`recurIcon` 从 task-meta 移至 task-title
+- `css/style.css`：`task-recur-icon` 增加 `vertical-align:middle` + 已完成状态去下划线
+
+---
+
+## [2.3.1] - 2026-07-20
+
+### 修复
+
+- **Session 持久化 Cookie 被覆盖**：修复「保持登录」勾选后，后续请求中 `session_start()` 会发送无过期时间 Cookie 覆盖登录时设置的 30 天有效期 Cookie，导致一段时间后 Session 丢失跳回登录界面
+  - 新增 `$_SESSION['persist_login']` 标记，仅在勾选「保持登录」的用户每次请求时刷新 Cookie 有效期
+  - 服务器端 `gc_maxlifetime` 保持 30 天，防止 session 文件被过早清理
+
+- **周/日循环重复任务首次出现偏移**：修复 `expandRecurringTasks` 以 `due_datetime`（当天创建的日期）作为展开锚点，当锚点日期恰好匹配重复规则中的目标日时（如周一创建每周一任务），`computeNextOccurrence` 会跳到下一周期
+  - 改用 `recurrence_start`（开始日期）作为展开锚点，保证第一个命中日不会因锚点本身落在匹配日而被跳过
+  - 此修复同时影响周循环（days-of-week）、月循环、年循环的首次命中计算
+
+### 优化
+
+- **新建/编辑任务表单字段顺序优化**：将「开始日期」移至「截止日期」之前，符合正常操作逻辑（先设起始再设截止）
+- 「开始日期」字段提升为主表单字段（始终可见），不再隐藏在重复任务折叠区内
+- 简化重复任务区域：移除冗余的「开始日期」独立行（开始日期已从主表单直接读取）
+
+---
+
+## [2.3.0] - 2026-07-20
+
+### 新增
+
+- **「保持登录」功能**：登录页新增「保持登录」复选框
+  - 勾选后 Session 持久化 30 天，关闭浏览器/重启电脑后无需重新登录
+  - 未勾选则保持原有行为：浏览器关闭后需重新登录
+  - 后端 `session.gc_maxlifetime` 提升至 30 天，解决服务器端过早清理 Session 导致"刷新跳回登录"的问题
+  - 登录时自动 `session_regenerate_id()` 重置 Session ID，防止会话固定攻击
+
+### 改动文件
+
+- `config.php`：Session 生命周期配置（gc_maxlifetime → 30 天）
+- `api.php`：login 接口新增 `remember_me` 参数，持久化 Cookie + Session ID 再生
+- `index.php`：登录表单新增「保持登录」复选框
+- `js/app.js`：登录请求携带 `remember_me` 参数，切到注册模式时隐藏复选框
+- `css/style.css`：新增复选框样式
+
+---
+
+## [2.2.9] - 2026-07-20
+
+### 修复
+
+- **重复任务首次出现计算错误**：修复 `computeNextOccurrence` 月/年循环无条件跳到下一周期的问题
+  - 月循环：若目标日仍在当前月份，不再错误跳转至下个月（例：起始日期 7月15日、目标 27日 → 正确返回 7月27日而非 8月27日）
+  - 年循环：同理修复，若目标日期仍在当年则留在当年
+  - 同步修复 `computePrevOccurrence` 对应的逆向逻辑缺陷
+
+### 影响范围
+
+- 涉及重复任务的创建、完成自动推进、日历虚拟展开、倒计时计算等功能
+
+---
+
+## [2.2.8] - 2026-07-18
+
+### 新增
+
+- **数据库自动备份系统**：
+  - 新增 `backup.php` 独立备份脚本，支持 CLI 直接执行和 HTTP 令牌触发
+  - `config.php` 新增 `autoBackupDaily()` 惰性备份函数，每次 API 请求自动检查当日是否已备份，未备份则自动执行
+  - 使用 SQLite 原生 `backup()` API 保证备份数据一致性（WAL 模式先 checkpoint）
+  - 自动清理旧备份，默认最多保留 15 份（可在 `config.php` 中调整 `backup_max`）
+  - 备份文件命名格式：`todolist_backup_YYYY-MM-DD_HHmmss.db`
+- `config.php` 新增 `backup_path`、`backup_max` 配置项
 
 ---
 
