@@ -1,5 +1,14 @@
 # 更新日志
 
+## v3.1.4 (2026-07-24)
+### 修复 — snooze 到时间不提醒的根因
+- 🐛 **Snooze 到期后不再弹窗**：`today_reminders` 查询 Custom 路径用了 `reminder_custom >= :min30`（30 分钟窗口）。Snooze 将 `reminder_custom` 设为"当时 Now + N 分钟"后，该值在 N+30 分钟后就会被刷掉。若前端定时器因浏览器节流稍有延迟，API 已经查不到该任务了。改为 `>= :min24h`（24 小时窗口），覆盖一天内的延时提醒
+  - Due 路径保持 `-30 min` 不变（避免极旧逾期任务大量刷出）
+  - Custom 路径用 `-24 hours`（用户主动设置的提醒理应保留更久）
+- 🔒 **`snooze_reminder` API 加固**：UPDATE 增加 `user_id` 条件 + `rowCount()` 检测，更新失败时前端能感知
+- 📡 **前端响应检查**：`snoozeReminder` / `dismissFromReminder` 现在解析 API 返回的 JSON 并检查 `success` 字段。后端失败时清除前端封锁定时器，避免"假成功"阻塞真实提醒
+- ⏱️ **前端封锁缓冲**：延时封锁定时器缓冲从 3s 增加到 30s，覆盖 30 秒轮询间隔的最大延迟
+
 ## v3.1.3 (2026-07-22)
 ### 修复 — 前端兜底封锁，彻底杜绝弹窗重复
 - 🛡️ **前端三态封锁**：`shownReminderIds` 值类型化为三态 —— `true`（展示中）、定时器ID（延时封锁）、`'dismissed'`（永久封锁）。不管后端 API 是否成功执行，前端自己保证不重复弹窗

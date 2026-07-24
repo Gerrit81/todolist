@@ -1302,14 +1302,26 @@ async function snoozeReminder(taskId, minutes) {
     // 前一次延时定时器（如有）先清掉
     if (typeof shownReminderIds[taskId] === 'number') clearTimeout(shownReminderIds[taskId]);
     // 前端兜底封锁：延时期间不弹窗，不依赖后端是否成功
-    shownReminderIds[taskId] = setTimeout(() => { delete shownReminderIds[taskId]; }, minutes * 60 * 1000 + 3000);
+    shownReminderIds[taskId] = setTimeout(() => { delete shownReminderIds[taskId]; }, minutes * 60 * 1000 + 30000);
     try {
         const fd = new FormData();
         fd.append('id', taskId);
         fd.append('minutes', minutes);
-        await fetch(API + '?action=snooze_reminder', { method: 'POST', body: fd });
-        showToast('已延时 +' + minutes + ' 分钟提醒', 'info');
-    } catch (e) { showToast('操作失败', 'error'); }
+        const r = await fetch(API + '?action=snooze_reminder', { method: 'POST', body: fd });
+        const j = await r.json();
+        if (j.success) {
+            showToast('已延时 +' + minutes + ' 分钟提醒', 'info');
+        } else {
+            // 后端失败：清除前端封锁，立即恢复可弹窗状态
+            if (typeof shownReminderIds[taskId] === 'number') clearTimeout(shownReminderIds[taskId]);
+            delete shownReminderIds[taskId];
+            showToast('延时失败：' + (j.message || '服务器错误'), 'error');
+        }
+    } catch (e) {
+        if (typeof shownReminderIds[taskId] === 'number') clearTimeout(shownReminderIds[taskId]);
+        delete shownReminderIds[taskId];
+        showToast('网络错误，延时失败', 'error');
+    }
 }
 
 /** 不再提醒：清除该任务所有提醒设置 */
@@ -1323,9 +1335,16 @@ async function dismissFromReminder(taskId) {
     try {
         const fd = new FormData();
         fd.append('id', taskId);
-        await fetch(API + '?action=dismiss_reminder', { method: 'POST', body: fd });
-        showToast('已不再提醒', 'info');
-    } catch (e) { showToast('操作失败', 'error'); }
+        const r = await fetch(API + '?action=dismiss_reminder', { method: 'POST', body: fd });
+        const j = await r.json();
+        if (j.success) {
+            showToast('已不再提醒', 'info');
+        } else {
+            showToast('操作失败：' + (j.message || '服务器错误'), 'error');
+        }
+    } catch (e) {
+        showToast('网络错误，操作失败', 'error');
+    }
 }
 
 /** 关闭提醒弹窗（仅关闭窗口，不改变封锁状态） */

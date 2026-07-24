@@ -109,7 +109,7 @@ if (!empty($_SESSION['user_id']) && !empty($_SESSION['persist_login'])) {
 $config = [
     // 应用基本信息
     'app_name'    => '任务管理系统',
-    'app_version' => '3.1.3',
+    'app_version' => '3.1.4',
 
     // SQLite 数据库文件路径（存放在 data 目录下，确保该目录可写）
     // 外网部署建议移到 Web 根目录之外，例如：

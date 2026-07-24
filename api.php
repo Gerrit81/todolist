@@ -1631,8 +1631,9 @@ try {
          */
         case 'today_reminders':
             requireAuth();
-            $now = date('Y-m-d H:i');
+            $now   = date('Y-m-d H:i');
             $min30 = date('Y-m-d H:i', strtotime('-30 minutes'));
+            $min24h = date('Y-m-d H:i', strtotime('-24 hours'));
             $stmt = $db->prepare("
                 SELECT t.id, t.title, t.priority, t.due_datetime, t.reminder_offset, t.reminder_custom,
                        c.name AS category_name 
@@ -1645,11 +1646,11 @@ try {
                      AND t.due_datetime >= :min30)
                     OR
                     (t.reminder_custom IS NOT NULL AND t.reminder_custom <= :now
-                     AND t.reminder_custom >= :min30)
+                     AND t.reminder_custom >= :min24h)
                   )
                 ORDER BY COALESCE(t.reminder_custom, t.due_datetime) ASC
             ");
-            $stmt->execute(['uid' => $currentUserId, 'now' => $now, 'min30' => $min30]);
+            $stmt->execute(['uid' => $currentUserId, 'now' => $now, 'min30' => $min30, 'min24h' => $min24h]);
             $reminders = $stmt->fetchAll();
             jsonResponse($reminders);
 
@@ -1671,8 +1672,9 @@ try {
 
             // 将提醒时间设为 now + delay，reminder_offset 置 NULL 避免 due_datetime 路径重复触发
             $newReminder = date('Y-m-d H:i', strtotime('+' . $minutes . ' minutes'));
-            $stmt = $db->prepare("UPDATE tasks SET reminder_custom = :rc, reminder_offset = NULL WHERE id = :id");
-            $stmt->execute(['rc' => $newReminder, 'id' => $taskId]);
+            $stmt = $db->prepare("UPDATE tasks SET reminder_custom = :rc, reminder_offset = NULL WHERE id = :id AND user_id = :uid");
+            $stmt->execute(['rc' => $newReminder, 'id' => $taskId, 'uid' => $currentUserId]);
+            if ($stmt->rowCount() === 0) jsonResponse([], false, '更新失败，请重试');
             jsonResponse(['reminder_custom' => $newReminder, 'minutes' => $minutes]);
 
         /**
