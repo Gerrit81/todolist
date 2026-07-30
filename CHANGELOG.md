@@ -1,5 +1,51 @@
 # 更新日志
 
+## v3.2.0 (2026-07-30)
+### 修复 — 循环任务完成 = 终结整体系列（核心逻辑重构）
+- 🐛 **根因**：`toggle_task` 对循环任务使用 "复制模型"——标记原任务 `is_completed=1` → `INSERT` 新行作为下一期。这导致原任务"死亡"不再被虚拟展开，新实例在边缘场景下（`seenKeys` 去重、视图日期范围不匹配等）不出现在列表中。
+- 🔄 **重构为 "推进模型"**：循环任务完成时 **不再标记 `is_completed=1`**，而是直接 **`UPDATE due_datetime=next + recurrence_start=next`**。任务永远保持 `is_completed=0`，始终被主查询和虚拟展开正确发现。
+  - `due_datetime`：推进到下一期（周一完成 → 下周一 / 下周四）
+  - `recurrence_start`：同步推进，防止虚拟展开从历史锚点重复生成已完成的次
+  - `completion_count`：递增作为完成次数计数
+  - `reminder_custom`：重置为 NULL，下次提醒按正常规则触发
+  - 仅当超过 `recurrence_end` 或无更多次时才正常标记 `is_completed=1`
+- 🎨 **前端适配**：API 返回 `data.due_datetime` 时识别为循环推进，仅刷新列表不做消失动画
+- 🗑️ **移除代码**：删除 `toggle_task` 中约 40 行 `INSERT` 复制逻辑，大幅简化
+
+## v3.1.8 (2026-07-27)
+### 新增 — 登录页版本号 + 自定义确认弹窗
+- 🔖 **登录页版本号**：`.auth-card` 底部新增 `v3.1.8` 版本展示，登录页面也能一目了然当前版本
+- 🎨 **自定义确认弹窗**：所有操作（退出登录、删除任务/清单/标签/附件/习惯、清空垃圾桶）的确认对话框从系统原生 `confirm()` 改为统一风格的自定义 `showConfirm()` 弹窗
+  - HTML 结构使用项目已有的 `.modal-overlay` + `.modal-box` 体系，按钮带危险色（红色）`btn-danger`
+  - JS 基于 Promise，`await showConfirm(标题, 描述)` 一行即可，代码清晰
+  - 共替换 8 处 `confirm()` 调用
+
+## v3.1.7 (2026-07-27)
+### 修复 — 延时提醒（+30/15/10/5分）报"服务器内部错误"
+- 🐛 **NOT NULL 约束冲突**：`reminder_offset` 列定义为 `INTEGER NOT NULL DEFAULT 0`，但 `snooze_reminder` 和 `dismiss_reminder` 仍用 v3.1.1 遗留的 `SET reminder_offset = NULL`。SQLite 抛出约束冲突 → PDOException → "服务器内部错误"
+- 🔧 **due 路径守卫改用 `reminder_custom IS NULL`**：原守卫 `reminder_offset IS NOT NULL` 仅对 NULL 生效。snooze 后 `reminder_custom` 已有值，改为 `reminder_custom IS NULL` 守卫能正确拦截 snooze 后的 due 路径重复触发，且无需设 `reminder_offset = NULL`
+  - `today_reminders`（弹窗提醒）+ 邮件通知两处查询均同步更新
+- 🩹 **`jsonResponse([], false, ...)`→ `jsonResponse(null, 400, ...)`**：snooze/dismiss 分支的 `jsonResponse` 第二参数传入 `false` 当作 HTTP 状态码，PHP 8.2 下 `false→0` 触发隐式转换 Deprecation Notice，可能污染 JSON 输出
+
+## v3.1.6 (2026-07-25)
+### 修复 — 备份文件全部 0 字节的严重 Bug
+- 🐛 **备份 0 字节根因**：三处备份代码（`backup.php` `performBackup()`、`config.php` `autoBackupDaily()`、`admin.php` `create_backup`）均使用 `SQLite3::backup()` 但从未检查返回值。`backup()` 失败返回 `false` 时，目标文件保持 `new SQLite3()` 创建的空壳（0 字节），代码仍当成功继续执行
+  - 群晖 PHP 8.2 上 `pdo_sqlite` 和 `sqlite3` 两个扩展可能链接不同版本 SQLite 库，导致 `backup()` 跨实例 API 静默失败
+- 🔧 **三层修复**：备份策略从 `SQLite3::backup()` 改为 **PHP 原生 `copy()` + WAL checkpoint 前置**
+  1. 先通过 PDO 执行 `PRAGMA wal_checkpoint(TRUNCATE)` 将 WAL 日志写入主文件
+  2. 用 `copy()` 直接复制数据库文件（简单可靠，零扩展依赖）
+  3. 验证 `filesize() > 0`，失败则删除空文件并报错
+  4. `copy()` 失败时自动回退到 `SQLite3::backup()`（检查返回值）
+- 🔍 **自动备份增强**：检查今天备份时自动过滤/删除 0 字节无效文件，避免假备份阻塞后续尝试
+- 🛡️ **异常捕获加固**：`autoBackupDaily()` 的 catch 从 `Exception` 改为 `Throwable`（覆盖 `Error` 如 SQLite3 类不存在）
+- 📋 **备份列表优化**：`list_backups` 自动清除并跳过历史上遗留的 0 字节备份
+
+## v3.1.5 (2026-07-25)
+### 修复 — 群晖 WebStation PHP 8.2 白屏问题
+- 🚨 **白屏诊断**：config.php 启用 `error_reporting(E_ALL)` + `display_errors` 后，致命错误会直接显示出来，不再"白屏"
+- 🔍 **全局 Try-Catch**：`getDB()` + `initDatabase()` 调用包裹在 `catch(Throwable)` 中，即使 PDO/SQLite 初始化失败也会输出友好错误页面 + 调用栈
+- 🕐 **默认时区**：`date_default_timezone_set('Asia/Shanghai')` 从 api.php 移到 config.php 顶部，确保 session cookie 等 date() 调用不产生时区警告
+
 ## v3.1.4 (2026-07-24)
 ### 修复 — snooze 到时间不提醒的根因
 - 🐛 **Snooze 到期后不再弹窗**：`today_reminders` 查询 Custom 路径用了 `reminder_custom >= :min30`（30 分钟窗口）。Snooze 将 `reminder_custom` 设为"当时 Now + N 分钟"后，该值在 N+30 分钟后就会被刷掉。若前端定时器因浏览器节流稍有延迟，API 已经查不到该任务了。改为 `>= :min24h`（24 小时窗口），覆盖一天内的延时提醒

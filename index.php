@@ -58,6 +58,7 @@ require_once __DIR__ . '/config.php';
             <span id="authSwitchText">还没有账号？</span>
             <a id="authSwitchLink" onclick="toggleAuthMode()">立即注册</a>
         </div>
+        <div class="auth-version">v<?php echo htmlspecialchars($config['app_version']); ?></div>
     </div>
 </div>
 
@@ -531,6 +532,18 @@ require_once __DIR__ . '/config.php';
             <span id="testEmailResult" style="font-size:12px;margin-left:8px"></span>
         </div>
         <div class="modal-actions"><button class="btn-cancel" onclick="closeSettings()">关闭</button><button class="btn-save" onclick="saveSettings()">保存</button></div>
+    </div>
+</div>
+
+<!-- 通用确认弹窗 -->
+<div id="confirmDialog" class="modal-overlay">
+    <div class="modal-box confirm-box">
+        <h3 id="confirmTitle">确认操作</h3>
+        <p id="confirmMessage" class="confirm-msg"></p>
+        <div class="modal-actions">
+            <button class="btn-cancel" id="confirmCancel">取消</button>
+            <button class="btn-danger" id="confirmOk">确定</button>
+        </div>
     </div>
 </div>
 

@@ -685,7 +685,8 @@ try {
                 LEFT JOIN categories c ON t.category_id = c.id 
                 WHERE t.user_id = :uid AND t.is_completed = 0 AND t.is_deleted = 0
                   AND (
-                    (t.due_datetime IS NOT NULL AND datetime(t.due_datetime, '-' || t.reminder_offset || ' minutes') <= :now
+                    (t.due_datetime IS NOT NULL AND t.reminder_custom IS NULL
+                     AND datetime(t.due_datetime, '-' || t.reminder_offset || ' minutes') <= :now
                      AND t.due_datetime >= :today_rem)
                     OR
                     (t.reminder_custom IS NOT NULL AND t.reminder_custom <= :now
@@ -1244,69 +1245,34 @@ try {
                 $task = $db->query("SELECT * FROM tasks WHERE id = $taskId AND user_id = $currentUserId")->fetch();
                 if (!$task) jsonResponse(null, 404, '任务不存在');
 
-                $db->prepare("UPDATE tasks SET is_completed=1, completed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=:id AND user_id=:uid")
-                   ->execute(['id' => $taskId, 'uid' => $currentUserId]);
-                writeLog("任务标记完成", ['id' => $taskId], $config);
-
-                // 重复任务：生成下一期实例
+                // 循环任务：推进 due_datetime 到下一期，不标记 is_completed
                 if (!empty($task['recurrence_type']) && !empty($task['due_datetime'])) {
                     $nextDt = computeNextOccurrence($task['due_datetime'], $task['recurrence_type'], $task['recurrence_rule']);
                     if ($nextDt) {
                         $nextDue = $nextDt->format('Y-m-d H:i');
-                        // 检查是否超过截止日期
                         $exceedEnd = false;
                         if (!empty($task['recurrence_end'])) {
                             $endDt = new DateTime($task['recurrence_end']);
                             if ($nextDt > $endDt) $exceedEnd = true;
                         }
                         if (!$exceedEnd) {
-                            // 复制原任务生成新实例
+                            // 推进到下一期：更新 due_datetime + recurrence_start（防止虚拟展开重复生成已完成的次），
+                            // 重置 reminder_custom，increment completion_count，保持 is_completed=0
                             $newCount = intval($task['completion_count'] ?? 0) + 1;
-                            $stmt = $db->prepare("
-                                INSERT INTO tasks (user_id, title, category_id, priority, due_datetime, 
-                                    reminder_offset, reminder_custom, notes, description, status, 
-                                    recurrence_type, recurrence_rule, recurrence_end, recurrence_start, completion_count)
-                                VALUES (:uid, :title, :cat, :pri, :due, 
-                                    :rem, :remcus, :notes, :desc, 'todo',
-                                    :rtype, :rrule, :rend, :rstart, :cnt)
-                            ");
-                            $stmt->execute([
-                                'uid'    => $task['user_id'],
-                                'title'  => $task['title'],
-                                'cat'    => $task['category_id'],
-                                'pri'    => $task['priority'],
-                                'due'    => $nextDue,
-                                'rem'    => $task['reminder_offset'],
-                                'remcus' => $task['reminder_custom'],
-                                'notes'  => $task['notes'],
-                                'desc'   => $task['description'],
-                                'rtype'  => $task['recurrence_type'],
-                                'rrule'  => $task['recurrence_rule'],
-                                'rend'   => $task['recurrence_end'],
-                                'rstart' => $task['recurrence_start'] ?? null,
-                                'cnt'    => $newCount,
-                            ]);
-                            $newId = $db->lastInsertId();
-                            // 复制标签
-                            $tags = $db->query("SELECT tag_id FROM task_tags WHERE task_id = $taskId")->fetchAll(PDO::FETCH_COLUMN);
-                            if (!empty($tags)) {
-                                $insStmt = $db->prepare("INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (:tid, :tgid)");
-                                foreach ($tags as $tgid) {
-                                    $insStmt->execute(['tid' => $newId, 'tgid' => $tgid]);
-                                }
-                            }
-                            // 获取新任务完整数据返回
-                            $newTask = $db->query("
-                                SELECT t.*, c.name AS category_name, c.color AS category_color
-                                FROM tasks t LEFT JOIN categories c ON t.category_id = c.id
-                                WHERE t.id = $newId
-                            ")->fetch();
-                            $rows = [$newTask];
-                            attachTagsToTasks($rows, $db);
-                            jsonResponse($rows[0], 200, '任务已完成，下一期已生成');
+                            $db->prepare("UPDATE tasks SET due_datetime=:due, recurrence_start=:rstart, completion_count=:cnt, reminder_custom=NULL, updated_at=datetime('now','localtime') WHERE id=:id AND user_id=:uid")
+                               ->execute(['due' => $nextDue, 'rstart' => $nextDue, 'cnt' => $newCount, 'id' => $taskId, 'uid' => $currentUserId]);
+                            writeLog("循环任务推进", ['id' => $taskId, 'next' => $nextDue, 'count' => $newCount], $config);
+                            jsonResponse(['due_datetime' => $nextDue, 'completion_count' => $newCount], 200, '任务已推进到下一期');
                         }
+                        // exceedEnd：超过截止日期 → 正常标记完成
                     }
+                    // nextDt 为空（无法计算）或无更多次 → 正常标记完成
                 }
+
+                // 普通任务 / 循环已到期：正常标记完成
+                $db->prepare("UPDATE tasks SET is_completed=1, completed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=:id AND user_id=:uid")
+                   ->execute(['id' => $taskId, 'uid' => $currentUserId]);
+                writeLog("任务标记完成", ['id' => $taskId], $config);
                 jsonResponse(null, 200, '任务已完成');
             } else {
                 $db->prepare("UPDATE tasks SET is_completed=0, completed_at=NULL, updated_at=datetime('now','localtime') WHERE id=:id AND user_id=:uid")
@@ -1641,7 +1607,7 @@ try {
                 LEFT JOIN categories c ON t.category_id = c.id 
                 WHERE t.user_id = :uid AND t.is_completed = 0 AND t.is_deleted = 0
                   AND (
-                    (t.due_datetime IS NOT NULL AND t.reminder_offset IS NOT NULL
+                    (t.due_datetime IS NOT NULL AND t.reminder_custom IS NULL
                      AND datetime(t.due_datetime, '-' || t.reminder_offset || ' minutes') <= :now
                      AND t.due_datetime >= :min30)
                     OR
@@ -1663,18 +1629,18 @@ try {
             $taskId  = intval($_POST['id'] ?? 0);
             $minutes = intval($_POST['minutes'] ?? 5);
             if ($taskId <= 0 || !in_array($minutes, [5, 10, 15, 30])) {
-                jsonResponse([], false, '参数错误');
+                jsonResponse(null, 400, '参数错误');
             }
             $stmt = $db->prepare("SELECT id, due_datetime FROM tasks WHERE id = :id AND user_id = :uid");
             $stmt->execute(['id' => $taskId, 'uid' => $currentUserId]);
             $task = $stmt->fetch();
-            if (!$task) jsonResponse([], false, '任务不存在');
+            if (!$task) jsonResponse(null, 400, '任务不存在');
 
-            // 将提醒时间设为 now + delay，reminder_offset 置 NULL 避免 due_datetime 路径重复触发
+            // 设置 reminder_custom = now + delay，due 路径由 reminder_custom IS NULL 守卫自动排除
             $newReminder = date('Y-m-d H:i', strtotime('+' . $minutes . ' minutes'));
-            $stmt = $db->prepare("UPDATE tasks SET reminder_custom = :rc, reminder_offset = NULL WHERE id = :id AND user_id = :uid");
+            $stmt = $db->prepare("UPDATE tasks SET reminder_custom = :rc WHERE id = :id AND user_id = :uid");
             $stmt->execute(['rc' => $newReminder, 'id' => $taskId, 'uid' => $currentUserId]);
-            if ($stmt->rowCount() === 0) jsonResponse([], false, '更新失败，请重试');
+            if ($stmt->rowCount() === 0) jsonResponse(null, 400, '更新失败，请重试');
             jsonResponse(['reminder_custom' => $newReminder, 'minutes' => $minutes]);
 
         /**
@@ -1684,10 +1650,10 @@ try {
         case 'dismiss_reminder':
             requireAuth();
             $taskId = intval($_POST['id'] ?? 0);
-            if ($taskId <= 0) jsonResponse([], false, '参数错误');
-            $stmt = $db->prepare("UPDATE tasks SET reminder_custom = NULL, reminder_offset = NULL WHERE id = :id AND user_id = :uid");
+            if ($taskId <= 0) jsonResponse(null, 400, '参数错误');
+            $stmt = $db->prepare("UPDATE tasks SET reminder_custom = NULL, reminder_offset = 0 WHERE id = :id AND user_id = :uid");
             $stmt->execute(['id' => $taskId, 'uid' => $currentUserId]);
-            if ($stmt->rowCount() === 0) jsonResponse([], false, '任务不存在');
+            if ($stmt->rowCount() === 0) jsonResponse(null, 400, '任务不存在');
             jsonResponse(['dismissed' => true]);
 
         // ==================== v5.0 任务状态流转 ====================

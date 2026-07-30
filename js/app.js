@@ -121,7 +121,7 @@ async function register() {
 }
 
 async function logout() {
-    if (!confirm('确定退出？')) return;
+    if (!await showConfirm('退出登录', '确定退出当前账号？')) return;
     try { await fetch(API + '?action=logout', { method: 'POST' }); } catch (e) {}
     location.reload();
 }
@@ -368,7 +368,7 @@ async function saveCategory() {
 }
 
 async function deleteCategory(id) {
-    if (!confirm('删除清单会一并删除其下任务，确定？')) return;
+    if (!await showConfirm('删除清单', '删除清单会一并删除其下任务，确定？')) return;
     try { await fetch(API + '?action=delete_category', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); await loadCategories(); loadTasks(); loadSummary(); } catch (e) {}
 }
 
@@ -430,7 +430,7 @@ async function saveTag() {
 }
 
 async function deleteTag(id) {
-    if (!confirm('确定删除该标签？')) return;
+    if (!await showConfirm('删除标签', '确定删除该标签？')) return;
     try { await fetch(API + '?action=delete_tag', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); await loadTags(); loadTasks(); } catch (e) {}
 }
 
@@ -670,6 +670,12 @@ async function toggleTask(id, s) {
         const r = await fetch(API + '?action=toggle_task', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, is_completed: s }) });
         const j = await r.json();
         if (!j.success) return;
+        // 循环任务推进：仅刷新列表（任务已移到下一期，不做消失动画）
+        if (j.data && j.data.due_datetime) {
+            showToast(j.message || '任务已推进');
+            await Promise.all([loadTasks(), loadCategories(), loadTags(), loadSummary()]);
+            return;
+        }
         const el = document.getElementById('task-' + id);
         if (el && s === 1) {
             el.classList.add('completed');
@@ -688,7 +694,7 @@ async function quickStatus(id, s) {
 }
 
 async function deleteTask(id) {
-    if (!confirm('确定删除该任务？')) return;
+    if (!await showConfirm('删除任务', '确定删除该任务？')) return;
     try {
         const r = await fetch(API + '?action=delete_task', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
         const j = await r.json();
@@ -700,12 +706,12 @@ async function deleteTask(id) {
 async function restoreTask(id) { try { await fetch(API + '?action=restore_task', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); showToast('已恢复', 'success'); await loadTasks(); loadSummary(); } catch (e) {} }
 
 async function permanentDeleteTask(id) {
-    if (!confirm('永久删除后无法恢复，确定？')) return;
+    if (!await showConfirm('永久删除', '永久删除后无法恢复，确定？')) return;
     try { await fetch(API + '?action=permanent_delete_task', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); showToast('已永久删除', 'success'); await loadTasks(); loadSummary(); } catch (e) {}
 }
 
 async function emptyTrash() {
-    if (!confirm('清空垃圾桶？不可撤销。')) return;
+    if (!await showConfirm('清空垃圾桶', '清空垃圾桶？此操作不可撤销。')) return;
     try { const r = await fetch(API + '?action=empty_trash', { method: 'POST' }); const j = await r.json(); showToast('已清空 ' + (j.data.count || 0) + ' 项', 'success'); await loadTasks(); loadSummary(); } catch (e) {}
 }
 
@@ -1619,7 +1625,7 @@ function renderEditAttachments(atts) {
     }).join('');
 }
 async function deleteAttachment(id) {
-    if (!confirm('删除此附件？')) return;
+    if (!await showConfirm('删除附件', '删除此附件？')) return;
     try { await fetch(API + '?action=delete_attachment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); showToast('附件已删除', 'success'); const taskId = parseInt(document.getElementById('editTaskId').value); if (taskId) editTask(taskId); } catch (e) {}
 }
 function handleEditFileSelect() {
@@ -1848,7 +1854,7 @@ async function saveHabit() {
     } catch (e) { showToast('网络错误', 'error'); }
 }
 async function deleteHabit(id) {
-    if (!confirm('确定删除该打卡习惯？所有记录将被清除。')) return;
+    if (!await showConfirm('删除习惯', '确定删除该打卡习惯？所有记录将被清除。')) return;
     try { await fetch(API + '?action=delete_habit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); showToast('习惯已删除', 'success'); await loadHabits(); } catch (e) {}
 }
 
@@ -1864,4 +1870,24 @@ function showToast(msg, type) {
     t.textContent = msg;
     document.body.appendChild(t);
     setTimeout(() => t.remove(), 3000);
+}
+
+function showConfirm(title, message) {
+    return new Promise((resolve) => {
+        document.getElementById('confirmTitle').textContent = title || '确认操作';
+        document.getElementById('confirmMessage').textContent = message || '确定执行此操作？';
+        document.getElementById('confirmDialog').classList.add('show');
+        document.getElementById('confirmOk').focus();
+
+        function onOk() { cleanup(); resolve(true); }
+        function onCancel() { cleanup(); resolve(false); }
+        function cleanup() {
+            document.getElementById('confirmDialog').classList.remove('show');
+            document.getElementById('confirmOk').removeEventListener('click', onOk);
+            document.getElementById('confirmCancel').removeEventListener('click', onCancel);
+        }
+
+        document.getElementById('confirmOk').addEventListener('click', onOk);
+        document.getElementById('confirmCancel').addEventListener('click', onCancel);
+    });
 }

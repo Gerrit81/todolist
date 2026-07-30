@@ -177,9 +177,14 @@ if (isset($_GET['action'])) {
                 if ($list) {
                     rsort($list);
                     foreach ($list as $f) {
+                        $sz = filesize($f);
+                        if ($sz <= 0) {
+                            @unlink($f); // 清除历史遗留的 0 字节无效备份
+                            continue;
+                        }
                         $files[] = [
                             'filename' => basename($f),
-                            'size'     => filesize($f),
+                            'size'     => $sz,
                             'mtime'    => date('Y-m-d H:i:s', filemtime($f)),
                         ];
                     }
@@ -203,18 +208,38 @@ if (isset($_GET['action'])) {
 
             $timestamp  = date('Y-m-d_His');
             $backupFile = $backupDir . 'todolist_backup_' . $timestamp . '.db';
+            $dbPath     = $config['db_path'];
 
             try {
-                $src = new SQLite3($config['db_path']);
-                $src->exec('PRAGMA journal_mode=WAL');
-                $src->exec('PRAGMA wal_checkpoint(FULL)');
-                $dst = new SQLite3($backupFile);
-                $src->backup($dst);
-                $src->close();
-                $dst->close();
+                // ---- 通过 PDO 将 WAL 日志写入主数据库文件 ----
+                try { $db->exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch (Exception $e) {}
+
+                // ---- 直接复制数据库文件（优先，不依赖 SQLite3 扩展） ----
+                $copied = @copy($dbPath, $backupFile);
+
+                // copy() 失败则回退到 SQLite3::backup()
+                if (!$copied && class_exists('SQLite3')) {
+                    $src = new SQLite3($dbPath);
+                    $src->exec('PRAGMA wal_checkpoint(FULL)');
+                    $dst = new SQLite3($backupFile);
+                    if ($src->backup($dst)) {
+                        $copied = true;
+                    }
+                    $src->close();
+                    $dst->close();
+                }
+
+                // ---- 验证备份文件 ----
+                $backupSize = @filesize($backupFile);
+                if (!$copied || $backupSize === false || $backupSize <= 0) {
+                    @unlink($backupFile);
+                    jsonResponse(null, 500, '备份失败: 备份文件大小为 0，请检查 data/ 目录权限');
+                }
+
                 writeLog("管理员手动备份: {$backupFile}", [], $config);
-                jsonResponse(['filename' => basename($backupFile), 'size' => filesize($backupFile)], 200, '备份成功');
-            } catch (Exception $e) {
+                jsonResponse(['filename' => basename($backupFile), 'size' => $backupSize], 200, '备份成功');
+            } catch (Throwable $e) {
+                @unlink($backupFile);
                 jsonResponse(null, 500, '备份失败: ' . $e->getMessage());
             }
             break;

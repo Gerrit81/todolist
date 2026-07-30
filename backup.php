@@ -88,18 +88,35 @@ function performBackup($config) {
     $timestamp  = date('Y-m-d_His');
     $backupFile = $backupDir . $prefix . $timestamp . '.db';
 
-    // ---- 使用 SQLite 在线备份 API（保证数据一致性） ----
-    $src = new SQLite3($sourceFile);
-    $src->exec('PRAGMA journal_mode=WAL');
-    $src->exec('PRAGMA wal_checkpoint(FULL)');  // 先将 WAL 写入主文件
+    // ---- 先将 WAL 日志写入主数据库文件 ----
+    walCheckpoint($sourceFile);
 
-    $dst = new SQLite3($backupFile);
-    
-    // SQLite3::backup() 是原子级别的安全备份方式
-    $src->backup($dst);
+    // ---- 直接复制数据库文件（简单可靠，不依赖 SQLite3 扩展） ----
+    if (!@copy($sourceFile, $backupFile)) {
+        // copy() 失败，回退到 SQLite3::backup() API（如果可用）
+        if (class_exists('SQLite3')) {
+            $src = new SQLite3($sourceFile);
+            $src->exec('PRAGMA wal_checkpoint(FULL)');
+            $dst = new SQLite3($backupFile);
+            if (!$src->backup($dst)) {
+                $src->close();
+                $dst->close();
+                @unlink($backupFile);
+                throw new RuntimeException("数据库备份失败: SQLite3::backup() 返回 false");
+            }
+            $src->close();
+            $dst->close();
+        } else {
+            throw new RuntimeException("数据库备份失败: copy() 和 SQLite3 均不可用");
+        }
+    }
 
-    $src->close();
-    $dst->close();
+    // ---- 验证备份文件 ----
+    $backupSize = filesize($backupFile);
+    if ($backupSize === false || $backupSize <= 0) {
+        @unlink($backupFile);
+        throw new RuntimeException("备份文件大小为 0，备份失败");
+    }
 
     // ---- 清理旧备份（保留最新 N 份） ----
     $files = glob($backupDir . $prefix . '*.db');
@@ -117,7 +134,7 @@ function performBackup($config) {
     }
 
     $retainedCount = min(count($files), $maxCopies);
-    $fileSize      = formatBytes(filesize($backupFile));
+    $fileSize      = formatBytes($backupSize);
 
     return [
         'success'  => true,
@@ -126,6 +143,36 @@ function performBackup($config) {
         'retained' => $retainedCount,
         'deleted'  => $deletedCount,
     ];
+}
+
+/**
+ * 执行 WAL checkpoint，将 WAL 日志写入主数据库文件
+ * 优先使用 PDO，回退到 SQLite3，再不济直接尝试 PDO 连接
+ */
+function walCheckpoint($dbPath) {
+    // 尝试通过已有的 PDO 全局连接
+    global $db;
+    if ($db instanceof PDO) {
+        try {
+            $db->exec('PRAGMA wal_checkpoint(TRUNCATE)');
+            return;
+        } catch (Exception $e) { /* 继续尝试其他方式 */ }
+    }
+
+    // 回退：打开临时 PDO 连接执行 checkpoint
+    try {
+        $tmpDb = new PDO('sqlite:' . $dbPath);
+        $tmpDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $tmpDb->exec('PRAGMA wal_checkpoint(TRUNCATE)');
+        $tmpDb = null;  // 关闭连接
+    } catch (Exception $e) {
+        // 最后尝试 SQLite3 扩展
+        if (class_exists('SQLite3')) {
+            $s = new SQLite3($dbPath);
+            $s->exec('PRAGMA wal_checkpoint(FULL)');
+            $s->close();
+        }
+    }
 }
 
 /**

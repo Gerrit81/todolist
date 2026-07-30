@@ -201,6 +201,7 @@ body.pomo-running{--pomo-border:var(--danger)}
 .auth-msg.error{color:#e53e3e}.auth-msg.success{color:#38a169}
 .auth-card .remember-label{display:flex;align-items:center;gap:8px;font-size:13px;color:rgba(45,55,72,.65);cursor:pointer;user-select:none;font-weight:400;margin-bottom:0}
 .remember-label input[type="checkbox"]{width:auto;accent-color:#667eea;cursor:pointer;flex-shrink:0}
+.auth-version{text-align:center;margin-top:12px;font-size:11px;color:rgba(45,55,72,.35);letter-spacing:0.5px}
 
 /* ========== 顶栏 ========== */
 .header{background:var(--glass);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100;box-shadow:var(--shadow)}
@@ -497,7 +498,14 @@ body.pomo-running{--pomo-border:var(--danger)}
 .btn-cancel,.btn-save{padding:9px 22px;border-radius:var(--radius-xs);font-size:14px;font-family:var(--font);cursor:pointer;font-weight:600;transition:all var(--transition)}
 .btn-cancel{border:1px solid var(--border);background:var(--bg);color:var(--text)}.btn-cancel:hover{background:var(--border)}
 .btn-save{border:none;background:var(--primary);color:#fff}.btn-save:hover{background:var(--primary-dark)}
-.edit-field{margin-bottom:12px}
+.btn-danger{padding:9px 22px;border:none;border-radius:var(--radius-xs);font-size:14px;font-family:var(--font);cursor:pointer;font-weight:600;transition:all var(--transition);background:var(--danger);color:#fff}
+.btn-danger:hover{opacity:.85;transform:translateY(-1px)}
+.btn-danger:active{transform:translateY(0)}
+/* 确认弹窗 */
+.confirm-box{width:400px;text-align:center}
+.confirm-box h3{justify-content:center;padding-right:0}
+.confirm-msg{color:var(--text-light);font-size:14px;line-height:1.6;margin-bottom:8px}
+.confirm-box .modal-actions{justify-content:center;gap:16px}.edit-field{margin-bottom:12px}
 .edit-field label{display:block;font-size:12px;color:var(--text-light);margin-bottom:4px;font-weight:600}
 .edit-field input,.edit-field select,.edit-field textarea{width:100%;padding:9px 12px;border:2px solid var(--border);border-radius:var(--radius-xs);font-size:13px;font-family:var(--font);outline:none;color:var(--text);background:var(--bg);transition:border var(--transition)}
 .edit-field input:focus,.edit-field select:focus,.edit-field textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-light)}

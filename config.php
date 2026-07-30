@@ -20,10 +20,13 @@
  */
 
 // -------------------- 调试模式：显示所有错误 --------------------
-// 遇到 500 错误时取消下面三行的注释，访问页面即可看到具体错误信息
-// error_reporting(E_ALL);
-// ini_set('display_errors', '1');
-// ini_set('display_startup_errors', '1');
+// 遇到 500/白屏 时取消下面三行的注释，访问页面即可看到具体错误信息
+error_reporting(E_ALL);
+ini_set('display_errors', '1');
+ini_set('display_startup_errors', '1');
+
+// 设置默认时区（必须在任何 date() 调用之前）
+date_default_timezone_set('Asia/Shanghai');
 
 // -------------------- 环境检查 --------------------
 
@@ -109,7 +112,7 @@ if (!empty($_SESSION['user_id']) && !empty($_SESSION['persist_login'])) {
 $config = [
     // 应用基本信息
     'app_name'    => '任务管理系统',
-    'app_version' => '3.1.4',
+    'app_version' => '3.2.0',
 
     // SQLite 数据库文件路径（存放在 data 目录下，确保该目录可写）
     // 外网部署建议移到 Web 根目录之外，例如：
@@ -872,10 +875,18 @@ function autoBackupDaily($config) {
 
     if (!file_exists($dbPath)) return;
 
-    // ---- 检查今天是否已有备份 ----
+    // ---- 检查今天是否已有有效备份（过滤掉 0 字节的无效备份） ----
     $todayPattern = $backupDir . 'todolist_backup_' . date('Y-m-d') . '_*.db';
     $todayBackups = glob($todayPattern);
-    if (!empty($todayBackups)) return;  // 今天已备份
+    if (!empty($todayBackups)) {
+        $hasValid = false;
+        foreach ($todayBackups as $f) {
+            $sz = @filesize($f);
+            if ($sz > 0) { $hasValid = true; break; }
+            @unlink($f); // 删除无效的 0 字节假备份
+        }
+        if ($hasValid) return;  // 今天已有有效备份
+    }
 
     // ---- 创建备份目录 ----
     if (!is_dir($backupDir)) {
@@ -887,14 +898,36 @@ function autoBackupDaily($config) {
     $backupFile = $backupDir . 'todolist_backup_' . $timestamp . '.db';
 
     try {
-        $src = new SQLite3($dbPath);
-        $src->exec('PRAGMA journal_mode=WAL');
-        $src->exec('PRAGMA wal_checkpoint(FULL)');
+        // ---- 通过 PDO 将 WAL 日志写入主数据库文件 ----
+        global $db;
+        if ($db instanceof PDO) {
+            try { $db->exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch (Exception $e) {}
+        }
 
-        $dst = new SQLite3($backupFile);
-        $src->backup($dst);
-        $src->close();
-        $dst->close();
+        // ---- 直接复制数据库文件（简单可靠，不依赖 SQLite3 扩展） ----
+        $copied = @copy($dbPath, $backupFile);
+
+        // copy() 失败则回退到 SQLite3::backup()
+        if (!$copied && class_exists('SQLite3')) {
+            $src = new SQLite3($dbPath);
+            $src->exec('PRAGMA wal_checkpoint(FULL)');
+            $dst = new SQLite3($backupFile);
+            if ($src->backup($dst)) {
+                $copied = true;
+            }
+            $src->close();
+            $dst->close();
+        }
+
+        // ---- 验证备份文件是否有效 ----
+        $backupSize = @filesize($backupFile);
+        if (!$copied || $backupSize === false || $backupSize <= 0) {
+            @unlink($backupFile);
+            if (function_exists('writeLog')) {
+                writeLog("自动备份失败: 备份文件大小为 0 或复制失败", [], $config);
+            }
+            return;
+        }
 
         // ---- 清理旧备份（优先使用后台管理设置） ----
         $adminDb = getDB($config);
@@ -919,8 +952,9 @@ function autoBackupDaily($config) {
             if ($i >= $adminMaxCount) @unlink($file);
         }
 
-    } catch (Exception $e) {
+    } catch (Throwable $e) {
         // 备份静默失败，不影响正常请求
+        @unlink($backupFile); // 清理可能产生的空文件
         if (function_exists('writeLog')) {
             writeLog("自动备份失败: " . $e->getMessage(), [], $config);
         }
@@ -967,5 +1001,28 @@ function getJsonInput() {
 
 // -------------------- 初始化执行 --------------------
 
-$db = getDB($config);
-initDatabase($db);
+try {
+    $db = getDB($config);
+    initDatabase($db);
+} catch (Throwable $e) {
+    // 初始化失败时输出详细错误信息，而不是白屏
+    if (PHP_SAPI !== 'cli') {
+        http_response_code(500);
+        header('Content-Type: text/html; charset=utf-8');
+        echo '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>初始化错误</title>';
+        echo '<style>body{font-family:sans-serif;padding:40px;background:#1a1a2e;color:#eee}';
+        echo '.err{background:#2d2d44;padding:20px;border-radius:8px;border-left:4px solid #e74c3c}';
+        echo 'code{color:#f39c12;word-break:break-all}</style></head><body>';
+        echo '<h1>系统初始化失败</h1><div class="err"><h3>'
+             . htmlspecialchars(get_class($e)) . '</h3>';
+        echo '<p>' . nl2br(htmlspecialchars($e->getMessage())) . '</p>';
+        echo '<p><small>文件：<code>' . htmlspecialchars($e->getFile()) . '</code> 第 '
+             . $e->getLine() . ' 行</small></p>';
+        echo '<details><summary>调用栈</summary><pre><code>'
+             . htmlspecialchars($e->getTraceAsString()) . '</code></pre></details>';
+        echo '</div></body></html>';
+    }
+    // 始终记录到日志
+    error_log('[' . date('Y-m-d H:i:s') . '] FATAL: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
+    exit(1);
+}
