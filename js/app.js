@@ -584,7 +584,7 @@ function renderTaskRow(t, isTrash = false) {
     if (t._virtual == 1) {
         const recurLabel = formatRecurrenceLabel(t.recurrence_type, t.recurrence_rule);
         return `<div class="task-item virtual-task${subClass}">
-            <div class="task-checkbox" onclick="toggleTask(${t.id},${t.is_completed == 1 ? 0 : 1})" title="标记此预排实例为完成"> </div>
+            <div class="task-checkbox" onclick="toggleTask(${t.id},${t.is_completed == 1 ? 0 : 1},'${t.due_date}')" title="标记此预排实例为完成"> </div>
             <div class="task-content" onclick="editTask(${t.id})">
                 <div class="task-title">${titlePrefix}${esc(t.title)} ${recurIcon} <span class="virtual-badge" title="${recurLabel}">预排</span></div>
                 <div class="task-meta">
@@ -665,9 +665,11 @@ async function createTask() {
 
 function buildDt(d, t) { return d ? (d + (t ? ' ' + t + ':00' : ' 09:00:00')) : null; }
 
-async function toggleTask(id, s) {
+async function toggleTask(id, s, dueDate) {
     try {
-        const r = await fetch(API + '?action=toggle_task', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, is_completed: s }) });
+        // 预排/虚拟实例完成时传 due_date（当前期次日期），后端据此精确推进到下一期，
+        // 避免因任务 due_datetime 异常（如误填成循环终止日期）导致循环系列被误终结。
+        const r = await fetch(API + '?action=toggle_task', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, is_completed: s, due_date: dueDate || null }) });
         const j = await r.json();
         if (!j.success) return;
         // 循环任务推进：仅刷新列表（任务已移到下一期，不做消失动画）
@@ -687,9 +689,15 @@ async function toggleTask(id, s) {
 
 async function quickStatus(id, s) {
     try {
-        await fetch(API + '?action=update_task_status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: parseInt(id), status: s }) });
+        const r = await fetch(API + '?action=update_task_status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: parseInt(id), status: s }) });
+        const j = await r.json();
+        if (j.success) {
+            // 循环任务标记完成时会推进到下一期（后端返回对应提示），此处直接展示后端消息
+            showToast(j.message || (s === 'done' ? '任务已完成' : (s === 'doing' ? '标记为处理中' : '已恢复待办')), 'success');
+        } else {
+            showToast(j.message || '操作失败', 'error');
+        }
         await Promise.all([loadTasks(), loadCategories(), loadTags(), loadSummary()]);
-        showToast(s === 'done' ? '任务已完成' : (s === 'doing' ? '标记为处理中' : '已恢复待办'), 'success');
     } catch (e) { showToast('操作失败', 'error'); }
 }
 

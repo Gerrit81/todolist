@@ -75,12 +75,15 @@ function computeNextOccurrence($dueDatetime, $recurType, $recurRule) {
         case 'monthly':
             $day = max(1, min(31, intval($rule['day'] ?? 1)));
             $currentDay = (int)$dt->format('j');
-            if ($day > $currentDay) {
+            // 目标日钳制到当月最后一天（如 31 号在 2 月 → 2/28）
+            $lastDay = (int)$dt->format('t');
+            $target  = min($day, $lastDay);
+            if ($target > $currentDay) {
                 // 本月目标日还在未来 → 留在本月
-                $lastDay = (int)$dt->format('t');
-                $dt->setDate($dt->format('Y'), $dt->format('m'), min($day, $lastDay));
+                $dt->setDate($dt->format('Y'), $dt->format('m'), $target);
             } else {
-                // 本月目标日已过 → 跳到下个月
+                // 本月目标日已到/已过（含 2/28 后接 31 号的情形）→ 跳到下个月，
+                // 避免返回与当前相同日期导致循环任务永远卡住
                 $dt->modify('first day of next month');
                 $lastDay = (int)$dt->format('t');
                 $dt->setDate($dt->format('Y'), $dt->format('m'), min($day, $lastDay));
@@ -93,17 +96,23 @@ function computeNextOccurrence($dueDatetime, $recurType, $recurRule) {
             $currentMonth = (int)$dt->format('m');
             $currentDay   = (int)$dt->format('j');
             $currentYear  = (int)$dt->format('Y');
-            if ($month > $currentMonth || ($month == $currentMonth && $day > $currentDay)) {
-                // 今年目标日还在未来 → 留在今年
-                $dt->setDate($currentYear, $month, 1);
-                $lastDay = (int)$dt->format('t');
-                $dt->setDate($currentYear, $month, min($day, $lastDay));
-            } else {
-                // 今年目标日已过 → 跳到下一年
-                $dt->setDate($currentYear + 1, $month, 1);
-                $lastDay = (int)$dt->format('t');
-                $dt->setDate($currentYear + 1, $month, min($day, $lastDay));
+            $useYear = $currentYear;
+            if ($month < $currentMonth || ($month == $currentMonth && $day <= $currentDay)) {
+                $useYear = $currentYear + 1;
             }
+            // 目标日钳制到该月最后一天；若钳制后仍不晚于当前日期（如非闰年 2/29 → 2/28），
+            // 逐年后移，保证下一次严格晚于当前期
+            $candidate = null;
+            for ($i = 0; $i < 8; $i++) {
+                $y = $useYear + $i;
+                $d = new DateTime(sprintf('%04d-%02d-01', $y, $month));
+                $lastDay = (int)$d->format('t');
+                $targetDay = min($day, $lastDay);
+                $candidate = sprintf('%04d-%02d-%02d', $y, $month, $targetDay);
+                $curDate   = sprintf('%04d-%02d-%02d', $currentYear, $currentMonth, $currentDay);
+                if (strcmp($candidate, $curDate) > 0) break;
+            }
+            $dt->setDate((int)substr($candidate,0,4), (int)substr($candidate,5,2), (int)substr($candidate,8,2));
             break;
 
             default:
@@ -323,6 +332,101 @@ function expandRecurringTasks($tasks, $rangeStart, $rangeEnd, &$seenKeys = []) {
     }
 
     return $virtuals;
+}
+
+/**
+ * 完成任务（checkbox / 状态按钮 / 预排实例共用）：
+ * - 循环任务：推进 due_datetime 到下一期，保持未完成状态（不标记 is_completed）
+ * - 普通任务 / 循环已到期：标记完成
+ *
+ * @param PDO    $db
+ * @param int    $taskId
+ * @param int    $uid
+ * @param string|null $dueDate 当前完成期次的日期（YYYY-MM-DD）。
+ *        预排/虚拟实例完成时由前端传入，以其为基准计算下一期；
+ *        避免因任务 due_datetime 异常（如创建时把「截止日期」误填成循环终止日期）
+ *        导致计算出的下一期超出终止日期而误终结整个循环系列。
+ * @return array|null  ['advanced'=>true, 'due_datetime'=>..., 'completion_count'=>...]
+ *                    或 ['completed'=>true]；任务不存在返回 null
+ */
+function completeTask($db, $taskId, $uid, $dueDate = null) {
+    $stmt = $db->prepare("SELECT * FROM tasks WHERE id = :id AND user_id = :uid");
+    $stmt->execute(['id' => $taskId, 'uid' => $uid]);
+    $task = $stmt->fetch();
+    if (!$task) return null;
+
+    // 循环任务：推进 due_datetime 到下一期，不标记 is_completed
+    if (!empty($task['recurrence_type']) && !empty($task['due_datetime'])) {
+        // 以「当前完成期次」为基准计算下一期（预排实例完成时优先使用传入的 due_date）
+        $baseDue = $task['due_datetime'];
+        if ($dueDate && preg_match('/^\d{4}-\d{2}-\d{2}$/', $dueDate)) {
+            $baseDue = $dueDate . ' 00:00';
+        }
+        $nextDt = computeNextOccurrence($baseDue, $task['recurrence_type'], $task['recurrence_rule']);
+        if ($nextDt) {
+            // 防御：下一期必须严格晚于当前期，否则视为无法推进（避免重复日期死循环）
+            $same = false;
+            try {
+                $curDt = new DateTime($baseDue);
+                $same  = $nextDt <= $curDt;
+            } catch (\Exception $e) { $same = true; }
+
+            $exceedEnd = false;
+            if (!$same && !empty($task['recurrence_end'])) {
+                try {
+                    $endDt = new DateTime($task['recurrence_end']);
+                    if ($nextDt > $endDt) $exceedEnd = true;
+                } catch (\Exception $e) {}
+            }
+
+            if (!$same && !$exceedEnd) {
+                $newCount = intval($task['completion_count'] ?? 0) + 1;
+                $nextDue  = $nextDt->format('Y-m-d H:i');
+                $db->prepare("UPDATE tasks SET due_datetime=:due, recurrence_start=:rstart, completion_count=:cnt, reminder_custom=NULL, status='todo', updated_at=datetime('now','localtime') WHERE id=:id AND user_id=:uid")
+                   ->execute(['due' => $nextDue, 'rstart' => $nextDue, 'cnt' => $newCount, 'id' => $taskId, 'uid' => $uid]);
+                return ['advanced' => true, 'due_datetime' => $nextDue, 'completion_count' => $newCount];
+            }
+
+            // v3.2.2：下一期超出终止日期，但当前期(due)本身已超出终止日期时，
+            // 说明 due_datetime 是异常数据（例如创建时把「截止日期」误填成了循环终止日期）。
+            // 此时尝试从开始日期重新定位终止日期内最后一个未完成期次并推进，
+            // 避免因异常数据直接终结整个循环系列。
+            if ($exceedEnd && !$dueDate && !empty($task['recurrence_end'])) {
+                try {
+                    $curRaw = new DateTime($task['due_datetime']);
+                    $endRaw = new DateTime($task['recurrence_end']);
+                    if ($curRaw > $endRaw) {
+                        $anchorSrc = $task['recurrence_start'] ?: $task['created_at'];
+                        if ($anchorSrc) {
+                            $anchorDt = new DateTime($anchorSrc);
+                            $candidate = null;
+                            $it = 0;
+                            while ($it < 600) {
+                                $n = computeNextOccurrence($anchorDt->format('Y-m-d H:i'), $task['recurrence_type'], $task['recurrence_rule']);
+                                if (!$n) break;
+                                if ($n > $endRaw) break;
+                                $candidate = $n;
+                                $anchorDt = $n;
+                                $it++;
+                            }
+                            if ($candidate) {
+                                $newCount = intval($task['completion_count'] ?? 0) + 1;
+                                $nextDue  = $candidate->format('Y-m-d H:i');
+                                $db->prepare("UPDATE tasks SET due_datetime=:due, recurrence_start=:rstart, completion_count=:cnt, reminder_custom=NULL, status='todo', updated_at=datetime('now','localtime') WHERE id=:id AND user_id=:uid")
+                                   ->execute(['due' => $nextDue, 'rstart' => $nextDue, 'cnt' => $newCount, 'id' => $taskId, 'uid' => $uid]);
+                                return ['advanced' => true, 'due_datetime' => $nextDue, 'completion_count' => $newCount];
+                            }
+                        }
+                    }
+                } catch (\Exception $e) {}
+            }
+        }
+    }
+
+    // 普通任务 / 循环已到期：正常标记完成
+    $db->prepare("UPDATE tasks SET is_completed=1, status='done', completed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=:id AND user_id=:uid")
+       ->execute(['id' => $taskId, 'uid' => $uid]);
+    return ['completed' => true];
 }
 
 // ---- 每日自动备份（惰性触发，同一天仅执行一次） ----
@@ -1195,6 +1299,15 @@ try {
             $recurStart = $recurType ? ($data['recurrence_start'] ?? null) : null;
             if ($recurStart !== null && $recurStart === '') $recurStart = null;
 
+            // 记录编辑前的完成状态：编辑弹窗里直接把状态改为「已完成」时，
+            // 需要与 checkbox/状态按钮一致地推进循环任务，不能直接写死 status=done
+            $prevTask = $db->prepare("SELECT is_completed FROM tasks WHERE id = :id AND user_id = :uid");
+            $prevTask->execute(['id' => $taskId, 'uid' => $currentUserId]);
+            $prevCompleted = intval($prevTask->fetchColumn()) === 1;
+
+            $incomingStatus = $data['status'] ?? 'todo';
+            if (!in_array($incomingStatus, ['todo','doing','done'], true)) $incomingStatus = 'todo';
+
             $stmt = $db->prepare("
                 UPDATE tasks 
                 SET title=:title, category_id=:category_id, priority=:priority, 
@@ -1214,7 +1327,7 @@ try {
                 'reminder_custom' => $reminderCustom,
                 'notes'           => trim($data['notes'] ?? ''),
                 'description'     => trim($data['description'] ?? ''),
-                'status'          => $data['status'] ?? 'todo',
+                'status'          => $incomingStatus,
                 'parent_id'       => $parentId,
                 'recurrence_type' => $recurType,
                 'recurrence_rule' => $recurRule,
@@ -1223,6 +1336,21 @@ try {
                 'id'              => $taskId,
                 'uid'             => $currentUserId,
             ]);
+
+            // 状态流转（编辑弹窗）：
+            if ($incomingStatus === 'done') {
+                if (!$prevCompleted) {
+                    $dueDate = isset($data['due_date']) ? trim($data['due_date']) : null;
+                    $result  = completeTask($db, $taskId, $currentUserId, $dueDate);
+                    if ($result !== null && !empty($result['advanced'])) {
+                        writeLog("循环任务推进", ['id' => $taskId, 'next' => $result['due_datetime'], 'count' => $result['completion_count']], $config);
+                    }
+                }
+            } elseif ($prevCompleted) {
+                // 从「已完成」改回待办/处理中：同步清除完成标记，避免 status/is_completed 不一致
+                $db->prepare("UPDATE tasks SET is_completed=0, completed_at=NULL, updated_at=datetime('now','localtime') WHERE id=:id AND user_id=:uid")
+                   ->execute(['id' => $taskId, 'uid' => $currentUserId]);
+            }
 
             setTaskTags($db, $taskId, parseTagIds($data), $currentUserId);
 
@@ -1241,37 +1369,17 @@ try {
             if ($taskId <= 0) jsonResponse(null, 400, '缺少任务ID');
 
             if ($isCompleted) {
-                // 先获取任务信息，判断是否有重复规则
-                $task = $db->query("SELECT * FROM tasks WHERE id = $taskId AND user_id = $currentUserId")->fetch();
-                if (!$task) jsonResponse(null, 404, '任务不存在');
+                // 预排/虚拟实例完成时前端会传 due_date（当前期次日期）
+                $dueDate = isset($data['due_date']) ? trim($data['due_date']) : null;
+                $result  = completeTask($db, $taskId, $currentUserId, $dueDate);
+                if ($result === null) jsonResponse(null, 404, '任务不存在');
 
-                // 循环任务：推进 due_datetime 到下一期，不标记 is_completed
-                if (!empty($task['recurrence_type']) && !empty($task['due_datetime'])) {
-                    $nextDt = computeNextOccurrence($task['due_datetime'], $task['recurrence_type'], $task['recurrence_rule']);
-                    if ($nextDt) {
-                        $nextDue = $nextDt->format('Y-m-d H:i');
-                        $exceedEnd = false;
-                        if (!empty($task['recurrence_end'])) {
-                            $endDt = new DateTime($task['recurrence_end']);
-                            if ($nextDt > $endDt) $exceedEnd = true;
-                        }
-                        if (!$exceedEnd) {
-                            // 推进到下一期：更新 due_datetime + recurrence_start（防止虚拟展开重复生成已完成的次），
-                            // 重置 reminder_custom，increment completion_count，保持 is_completed=0
-                            $newCount = intval($task['completion_count'] ?? 0) + 1;
-                            $db->prepare("UPDATE tasks SET due_datetime=:due, recurrence_start=:rstart, completion_count=:cnt, reminder_custom=NULL, updated_at=datetime('now','localtime') WHERE id=:id AND user_id=:uid")
-                               ->execute(['due' => $nextDue, 'rstart' => $nextDue, 'cnt' => $newCount, 'id' => $taskId, 'uid' => $currentUserId]);
-                            writeLog("循环任务推进", ['id' => $taskId, 'next' => $nextDue, 'count' => $newCount], $config);
-                            jsonResponse(['due_datetime' => $nextDue, 'completion_count' => $newCount], 200, '任务已推进到下一期');
-                        }
-                        // exceedEnd：超过截止日期 → 正常标记完成
-                    }
-                    // nextDt 为空（无法计算）或无更多次 → 正常标记完成
+                if (!empty($result['advanced'])) {
+                    // 循环任务已推进到下一期
+                    writeLog("循环任务推进", ['id' => $taskId, 'next' => $result['due_datetime'], 'count' => $result['completion_count']], $config);
+                    jsonResponse(['due_datetime' => $result['due_datetime'], 'completion_count' => $result['completion_count']], 200, '任务已推进到下一期');
                 }
 
-                // 普通任务 / 循环已到期：正常标记完成
-                $db->prepare("UPDATE tasks SET is_completed=1, completed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=:id AND user_id=:uid")
-                   ->execute(['id' => $taskId, 'uid' => $currentUserId]);
                 writeLog("任务标记完成", ['id' => $taskId], $config);
                 jsonResponse(null, 200, '任务已完成');
             } else {
@@ -1597,9 +1705,11 @@ try {
          */
         case 'today_reminders':
             requireAuth();
-            $now   = date('Y-m-d H:i');
-            $min30 = date('Y-m-d H:i', strtotime('-30 minutes'));
-            $min24h = date('Y-m-d H:i', strtotime('-24 hours'));
+            // 注意：必须带秒，否则 datetime(...) 规范化补出的 ':00' 会让「当前分钟」的
+            // 到期提醒比较失败（如 10:41:00 <= 10:41 为 false），导致提醒晚 1 分钟才触发
+            $now   = date('Y-m-d H:i:s');
+            $min30 = date('Y-m-d H:i:s', strtotime('-30 minutes'));
+            $min24h = date('Y-m-d H:i:s', strtotime('-24 hours'));
             $stmt = $db->prepare("
                 SELECT t.id, t.title, t.priority, t.due_datetime, t.reminder_offset, t.reminder_custom,
                        c.name AS category_name 
@@ -1666,14 +1776,28 @@ try {
             if ($taskId <= 0 || !in_array($status, ['todo','doing','done'])) {
                 jsonResponse(null, 400, '参数不完整或状态无效');
             }
-            $isCompleted = ($status === 'done') ? 1 : 0;
-            $completedAt = ($status === 'done') ? "datetime('now','localtime')" : 'NULL';
+
+            // 标记完成：与 checkbox（toggle_task）共用 completeTask，
+            // 循环任务推进到下一期，避免「标记完成」后循环任务永久消失
+            if ($status === 'done') {
+                $dueDate = isset($data['due_date']) ? trim($data['due_date']) : null;
+                $result  = completeTask($db, $taskId, $currentUserId, $dueDate);
+                if ($result === null) jsonResponse(null, 404, '任务不存在');
+
+                if (!empty($result['advanced'])) {
+                    writeLog("循环任务推进", ['id' => $taskId, 'next' => $result['due_datetime'], 'count' => $result['completion_count']], $config);
+                    jsonResponse(['id' => $taskId, 'status' => 'todo', 'due_datetime' => $result['due_datetime'], 'completion_count' => $result['completion_count']], 200, '任务已推进到下一期');
+                }
+                writeLog("任务状态更新: done", ['id' => $taskId], $config);
+                jsonResponse(['id' => $taskId, 'status' => 'done'], 200, '任务已完成');
+            }
+
+            // 非完成状态：恢复待办 / 标记处理中
             $db->prepare("
-                UPDATE tasks SET status=:status, is_completed=:comp, 
-                    completed_at=CASE WHEN :status='done' THEN datetime('now','localtime') ELSE NULL END,
+                UPDATE tasks SET status=:status, is_completed=0, completed_at=NULL,
                     updated_at=datetime('now','localtime')
                 WHERE id=:id AND user_id=:uid
-            ")->execute(['status' => $status, 'comp' => $isCompleted, 'id' => $taskId, 'uid' => $currentUserId]);
+            ")->execute(['status' => $status, 'id' => $taskId, 'uid' => $currentUserId]);
             writeLog("任务状态更新: {$status}", ['id' => $taskId], $config);
             jsonResponse(['id' => $taskId, 'status' => $status], 200, '状态已更新');
 
